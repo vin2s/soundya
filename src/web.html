@@ -1915,11 +1915,9 @@
       <button class="primary" onclick="testTv()" id="tvtestbtn">Сохранить и подключить</button>
     </div>
     <div class="field">Поиск фильмов
-      <p class="hint">«Алиса, найди фильм Колобок на телевизоре»: телевизор включится и найдёт фильм в выбранном приложении.
-        Поиск внутри приложения работает у Кинопоиска, YouTube и SmartTube. Если приложение не примет поиск —
-        откроется общий поиск телевизора. У каждого телевизора — своё.</p>
-      <div id="tvsearch"></div>
-      <div class="msg" id="tvsearchmsg"></div>
+      <p class="hint">Приложение называется голосом: «Алиса, найди фильм Колобок на кинопоиске» или
+        «включи фильм Колобок на зоне». Без приложения — «на телевизоре» — откроется общий поиск телевизора.
+        У каждого телевизора — своё.</p>
     </div>
     <label class="check">
       <input type="checkbox" id="remotetab" onchange="saveRemoteTab()">
@@ -3054,46 +3052,6 @@ async function loadMacros() {
       macroSteps = m.script.split('\n').map(x => x.trim()).filter(Boolean).map(parseLine); renderSteps();
     }, '', right));
   }
-}
-// «Поиск фильмов»: per TV (by its address) the app to search in; '' — the TV's own search.
-const tvSearchApps = {};
-function renderTvSearch(st) {
-  const box = $('tvsearch'), map = st.tv_search || {};
-  const tvs = [];
-  if ((st.tv_host || '').trim()) tvs.push({ host: st.tv_host.trim(), label: st.tv_name || 'Телевизор' });
-  for (const t of st.tvs_more || []) if ((t.host || '').trim()) tvs.push({ host: t.host.trim(), label: t.name || t.host });
-  box.replaceChildren();
-  if (!tvs.length) { const p = document.createElement('p'); p.className = 'hint'; p.textContent = 'Сначала добавьте телевизор выше.'; box.append(p); return; }
-  for (const t of tvs) {
-    const row = document.createElement('div'); row.className = 'row devrow';
-    const name = document.createElement('b'); name.textContent = t.label;
-    const sel = document.createElement('select'); sel.className = 'tvsearchapp'; sel.dataset.host = t.host;
-    const list = tvSearchApps[t.host];
-    const cur = map[t.host] || '';
-    const opts = [['', 'Общий поиск телевизора']];
-    const pkgs = list ? [...list.apps].sort((x, y) => (list.names[x] || x).localeCompare(list.names[y] || y, 'ru')) : [];
-    if (cur && !pkgs.includes(cur)) pkgs.unshift(cur);
-    for (const p of pkgs) opts.push([p, list && list.names[p] ? list.names[p] : p]);
-    sel.replaceChildren(...opts.map(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; return o; }));
-    sel.value = cur;
-    sel.onchange = saveTvSearch;
-    const b = document.createElement('button'); b.className = 'ghost'; b.textContent = list ? 'Обновить список' : 'Загрузить приложения';
-    b.onclick = async () => {
-      busy($('tvsearchmsg'), `Спрашиваю «${t.label}»…`);
-      const r = await postJSON('tv appsat ' + t.host);
-      if (r.error || !r.apps) { show($('tvsearchmsg'), 'error: ' + (r.error || 'телевизор не ответил')); return; }
-      tvSearchApps[t.host] = { apps: r.apps, names: r.names || {} };
-      busy($('tvsearchmsg'), ''); renderTvSearch(settings);
-    };
-    row.append(name, sel, b);
-    box.append(row);
-  }
-}
-async function saveTvSearch() {
-  const map = {};
-  document.querySelectorAll('#tvsearch .tvsearchapp').forEach(s => { if (s.value) map[s.dataset.host] = s.value; });
-  show($('tvsearchmsg'), await post('/api/settings', JSON.stringify({ tv_search: map })));
-  settingsLoaded = false; refresh();
 }
 async function loadTvApps() {
   busy($('macromsg'), 'Спрашиваю телевизор…');
@@ -5477,7 +5435,6 @@ async function refresh() {
     $('stats').checked = settings.stats !== false;
     $('shareheard').checked = settings.share_heard === true;
     $('tvhost').value = settings.tv_host || '';
-    renderTvSearch(settings);
     $('fsc').checked = settings.soundcloud !== false;
     $('fpc').checked = settings.pc_on !== false;
     $('ftv').checked = settings.tv_on !== false;

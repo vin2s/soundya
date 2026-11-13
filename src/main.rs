@@ -544,7 +544,6 @@ impl Controller {
         settings["alarm_own"] = self.settings.alarm_own.into();
         settings["alarm_volume"] = self.settings.alarm_volume.into();
         settings["alarm_louder"] = self.settings.alarm_louder.into();
-        settings["tv_search"] = serde_json::json!(self.settings.tv_search);
         settings["pc_power"] = self.settings.pc_power.into();
         settings["pc_apps"] = self.settings.pc_apps.into();
         settings["pc_tg"] = self.settings.pc_tg.into();
@@ -1035,17 +1034,6 @@ impl Controller {
         new.tv_host = new.tv_host.trim().to_owned();
         self.shared.tv.store(new.tv_configured(), Ordering::Release);
         alice::set_tv(new.tv_configured());
-        // Only the TVs there are, each with a package name (or none: its own search).
-        let hosts: Vec<String> = new.tvs().into_iter().map(|t| t.host).collect();
-        new.tv_search = std::mem::take(&mut new.tv_search)
-            .into_iter()
-            .map(|(h, p)| (h.trim().to_owned(), p.trim().to_owned()))
-            .filter(|(h, p)| hosts.contains(h) && !p.is_empty())
-            .collect();
-        if let Some((_, p)) = new.tv_search.iter().find(|(_, p)| !tv::valid_package(p)) {
-            return format!("error: «{p}» — не имя приложения (например ru.kinopoisk.tv)");
-        }
-        tv::set_search_apps(new.tv_search.clone());
         alice::set_devices(device_names(&new));
         new.pc_keep = new.pc_keep.trim().chars().take(500).collect();
         alice::set_pc_rules(pc_rules(&new));
@@ -2169,19 +2157,6 @@ impl Controller {
             "tv" => {
                 let (what, rest) = arg.split_once(' ').unwrap_or((arg.as_str(), ""));
                 let rest = rest.trim();
-                // The panel's «Искать фильмы в» for one of several TVs: that TV's apps.
-                if what == "appsat" {
-                    let Some(host) = self.settings.tvs().into_iter().map(|t| t.host).find(|h| h == rest) else {
-                        send_to(&reply, "error: такого телевизора нет в настройках".into());
-                        return;
-                    };
-                    let dir = self.dir.clone();
-                    thread::spawn(move || match tv::run(&host, &dir, &alice::TvAction::Apps) {
-                        Ok(json) => send_to(&reply, json),
-                        Err(e) => send_to(&reply, serde_json::json!({ "error": e }).to_string()),
-                    });
-                    return;
-                }
                 let action = match what {
                     "ping" => Some(alice::TvAction::Ping),
                     "wake" | "on" => Some(alice::TvAction::Wake),
@@ -2190,7 +2165,7 @@ impl Controller {
                     "open" if !rest.is_empty() => Some(alice::TvAction::Open(rest.to_owned())),
                     "openpkg" if !rest.is_empty() => Some(alice::TvAction::OpenPackage(rest.to_owned())),
                     "close" if !rest.is_empty() => Some(alice::TvAction::Close(rest.to_owned())),
-                    "search" if !rest.is_empty() => Some(alice::TvAction::Search(rest.to_owned())),
+                    "search" if !rest.is_empty() => Some(alice::TvAction::Search(rest.to_owned(), None)),
                     "youtube" if !rest.is_empty() => Some(alice::TvAction::YouTube(rest.to_owned())),
                     // A scenario's «Нажать на экране»: what is written on it.
                     "tap" if !rest.is_empty() => Some(alice::TvAction::Tap(rest.to_owned())),
@@ -3558,7 +3533,6 @@ fn daemon() {
     alarm::run(&dir, tx.clone());
     adbkeep::configure(settings.adb_keep);
     alice::set_tv(settings.tv_configured());
-    tv::set_search_apps(settings.tv_search.clone());
     alice::set_devices(device_names(&settings));
     alice::set_pc_rules(pc_rules(&settings));
     alarm::set_morning(settings.morning_on);

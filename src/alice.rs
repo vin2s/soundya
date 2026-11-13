@@ -123,8 +123,9 @@ pub enum TvAction {
     Sleep,
     /// Open an app: «открой ютуб на проекторе».
     Open(String),
-    /// Search films and shows across apps: «найди фильм дюна на проекторе».
-    Search(String),
+    /// Search films and shows: «найди фильм дюна на проекторе» (the TV's own
+    /// search), «найди фильм дюна на кинопоиске» (inside the named app).
+    Search(String, Option<String>),
     /// Search YouTube: «включи на ютубе котиков на проекторе».
     YouTube(String),
     /// Remote-control keys: the Android key code and how many presses.
@@ -310,6 +311,33 @@ pub fn set_tv(on: bool) {
     tv_state(|s| s.set_up = on);
 }
 
+/// «Найди (включи) фильм Колобок на кинопоиске» without «на телевизоре»: naming
+/// the app makes it the TV's, and the search is inside that app.
+fn tv_app_search(n: &str) -> Option<TvAction> {
+    let (query, app) = crate::tv::split_app_suffix(n)?;
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let first = *words.first()?;
+    if !matches!(first, "найди" | "поищи" | "покажи" | "включи" | "поставь") {
+        return None;
+    }
+    let mut q = words[1..].join(" ");
+    let mut film = false;
+    for noun in ["фильм ", "сериал ", "мультфильм ", "мультик ", "кино ", "фильмы ", "сериалы "] {
+        if let Some(r) = q.strip_prefix(noun) {
+            q = r.to_owned();
+            film = true;
+            break;
+        }
+    }
+    // «включи мой плейлист в дорогу на саундклауде» is music, not a TV search:
+    // an app unknown to the TV list needs the film noun to make the phrase the TV's.
+    if !film && !crate::tv::app_named(&app) && !crate::tv::tv_only_app(&app) {
+        return None;
+    }
+    let q = q.trim();
+    (!q.is_empty()).then(|| TvAction::Search(q.to_owned(), Some(app)))
+}
+
 /// Phrases for the TV that do not name it: «ещё выше» right after a TV command;
 /// SmartTube (only the TV has it); «открой впн и включи его».
 fn tv_unnamed(n: &str) -> Option<TvAction> {
@@ -475,20 +503,27 @@ fn tv(text: &str) -> Option<TvAction> {
     match first {
         "найди" | "поищи" | "покажи" | "включи" | "поставь" => {
             let mut q = after(1);
+            let mut film = false;
             for noun in ["фильм ", "сериал ", "мультфильм ", "мультик ", "кино ", "фильмы ", "сериалы "] {
                 if let Some(r) = q.strip_prefix(noun) {
                     q = r.to_owned();
-                    return (!q.is_empty()).then_some(TvAction::Search(q));
+                    film = true;
+                    break;
                 }
             }
-            if q.is_empty() {
+            // «найди фильм колобок на кинопоиске»: the app to search in.
+            let (q, app) = match crate::tv::split_app_suffix(&q) {
+                Some((head, app)) => (head, Some(app)),
+                None => (q, None),
+            };
+            if q.trim().is_empty() {
                 return None;
             }
-            // «включи ютуб на проекторе»: an app; «найди дюну»: a search.
-            if matches!(first, "включи" | "поставь") {
+            // «включи ютуб на проекторе»: an app; «найди дюну»: the TV's own search.
+            if matches!(first, "включи" | "поставь") && app.is_none() && !film {
                 return Some(TvAction::Open(q));
             }
-            Some(TvAction::Search(q))
+            Some(TvAction::Search(q.trim().to_owned(), app))
         }
         "открой" | "запусти" | "открыть" | "запустить" => {
             // «запусти приложение лифт»: the app is «лифт»; stray «на» left from the places go.
@@ -1161,8 +1196,9 @@ fn intent_plain(text: &str, keyword_only: bool) -> Option<Intent> {
     if let Some(on) = remote_phrase(&normalize(text)) {
         return Some(Intent::Tv(TvAction::RemoteMode(on)));
     }
-    // The TV first: «перемотай вперёд на проекторе», «открой ютуб на проекторе».
-    if let Some(action) = tv(&normalize(text)).or_else(|| tv_unnamed(&normalize(text))) {
+    // The TV first: «перемотай вперёд на проекторе», «открой ютуб на проекторе»;
+    // then the app named without the TV: «найди фильм колобок на кинопоиске».
+    if let Some(action) = tv(&normalize(text)).or_else(|| tv_app_search(&normalize(text))).or_else(|| tv_unnamed(&normalize(text))) {
         return Some(Intent::Tv(action));
     }
     if matches!(
@@ -2284,16 +2320,23 @@ mod tests {
         assert_eq!(t("выключи телевизор"), Some(TvAction::Sleep));
         assert_eq!(t("открой ютуб на проекторе"), Some(TvAction::Open("ютуб".into())));
         assert_eq!(t("запусти кинопоиск на телевизоре"), Some(TvAction::Open("кинопоиск".into())));
-        assert_eq!(t("найди фильм дюна на проекторе"), Some(TvAction::Search("дюна".into())));
+        assert_eq!(t("найди фильм дюна на проекторе"), Some(TvAction::Search("дюна".into(), None)));
         assert_eq!(t("включи на ютубе котиков на проекторе"), Some(TvAction::YouTube("котиков".into())));
         assert_eq!(t("найди на ютубе как приготовить плов на телевизоре"), Some(TvAction::YouTube("как приготовить плов".into())));
         assert_eq!(t("пауза на проекторе"), Some(TvAction::Key("KEYCODE_MEDIA_PAUSE", 1)));
         assert_eq!(t("сделай громче на телевизоре"), Some(TvAction::Key("KEYCODE_VOLUME_UP", 3)));
         assert_eq!(t("перемотай вперед на проекторе"), Some(TvAction::Key("KEYCODE_MEDIA_FAST_FORWARD", 1)));
-        assert_eq!(t("включи сериал друзья на проекторе"), Some(TvAction::Search("друзья".into())));
+        assert_eq!(t("включи сериал друзья на проекторе"), Some(TvAction::Search("друзья".into(), None)));
+        // The app is named: search inside it, even without «на телевизоре».
+        assert_eq!(t("найди фильм колобок на кинопоиске"), Some(TvAction::Search("колобок".into(), Some("кинопоиске".into()))));
+        assert_eq!(t("включи фильм колобок на зоне"), Some(TvAction::Search("колобок".into(), Some("зоне".into()))));
+        assert_eq!(t("найди фильм колобок на кинопоиске на телевизоре"), Some(TvAction::Search("колобок".into(), Some("кинопоиске".into()))));
+        // No app named: the TV's own (Google) search.
+        assert_eq!(t("найди фильм колобок на телевизоре"), Some(TvAction::Search("колобок".into(), None)));
         // Without the TV named: not a TV command.
         assert_eq!(t("включи bonobo"), None);
         assert_eq!(t("открой ютуб"), None);
+        assert_eq!(t("включи зону"), None);
     }
 
     #[test]

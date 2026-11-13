@@ -145,10 +145,6 @@ pub struct Settings {
     /// Android TV / projector with network ADB: "192.168.0.50" or "host:port".
     #[serde(default)]
     pub tv_host: String,
-    /// «Искать фильмы в», per TV: its address → the app «найди фильм … на телевизоре»
-    /// searches in (package); a TV not here: its own search.
-    #[serde(default)]
-    pub tv_search: std::collections::BTreeMap<String, String>,
     /// Music service for requests that name none: "soundcloud" (as before
     /// 0.5.00) or "yandex" (Yandex Music; SoundCloud only when it is named).
     #[serde(default = "music_default")]
@@ -693,7 +689,6 @@ impl Default for Settings {
             stats: true,
             share_heard: false,
             tv_host: String::new(),
-            tv_search: Default::default(),
             macros: Vec::new(),
             bypass: String::new(),
             proxy_on: true,

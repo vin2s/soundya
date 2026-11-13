@@ -35,6 +35,7 @@ const APPS: &[(&str, &[&str], &[&str])] = &[
     ("KinoPub", &["кинопаб", "kinopub"], &["kinopub"]),
     ("HD VideoBox", &["видеобокс", "hd videobox"], &["videobox"]),
     ("SmartTube", &["смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "смарт тьюбе", "smarttube", "smart tube"], &["liskovsoft.smarttubetv", "smarttube"]),
+    ("Zona", &["зона", "зону", "зоне", "zona"], &["zona"]),
     ("VPN", &["впн", "vpn", "випиэн"], &["vpn", "wireguard", "amnezia", "outline", "hiddify", "v2ray", "nekobox", "openvpn"]),
 ];
 
@@ -364,22 +365,30 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             let keys = vec![*code; usize::from(*n)].join(" ");
             sh(&format!("input keyevent {keys}")).map(|_| "Готово".into())
         }
-        TvAction::Search(q) => {
+        TvAction::Search(q, app) => {
             // «Алиса, найди фильм Колобок»: the TV on first, then the search (#SY-F351993A).
             let asleep = sh("dumpsys power | grep -m1 mWakefulness=").map(|o| !o.contains("Awake")).unwrap_or(false);
             if asleep {
                 let _ = sh("input keyevent KEYCODE_WAKEUP");
                 std::thread::sleep(Duration::from_millis(1500));
             }
-            let app = SEARCH_APPS.lock().unwrap().get(host).cloned().unwrap_or_default();
-            if let Some(cmd) = search_script(&app, q) {
-                match sh(&cmd) {
-                    Ok(out) if !out.contains("Error") => return Ok(format!("Ищу {q} в {}", label(&app))),
-                    Ok(out) => eprintln!("tv: {app} does not search ({}); the TV's own search", out.trim()),
-                    Err(e) => eprintln!("tv: {app} search: {e}; the TV's own search"),
+            // No app named — the TV's own (Google) search, as asked.
+            let Some(spoken) = app else {
+                return sh(&global_search(q)).map(|_| format!("Ищу {q} в общем поиске"));
+            };
+            let list = sh("pm list packages")?;
+            let packages: Vec<String> =
+                list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
+            let Some(pkg) = find_package(spoken, &packages) else {
+                return Err(format!("Не нашла на телевизоре приложение {spoken}"));
+            };
+            match search_in_app(&sh, &pkg, q) {
+                Ok(text) => Ok(text),
+                Err(e) => {
+                    eprintln!("tv: search in {pkg}: {e}; the TV's own search");
+                    sh(&global_search(q)).map(|_| format!("Не получилось найти в {} — ищу в общем поиске", label(&pkg)))
                 }
             }
-            sh(&global_search(q)).map(|_| format!("Ищу {q}"))
         }
         TvAction::YouTube(q) => {
             let url = format!("https://www.youtube.com/results?search_query={}", percent_encode(q));
@@ -508,27 +517,93 @@ fn packages_of(out: &str) -> Vec<String> {
         .collect()
 }
 
-/// «Искать фильмы в», per TV (address → package); a TV not here: its own search.
-static SEARCH_APPS: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-pub fn set_search_apps(apps: std::collections::BTreeMap<String, String>) {
-    *SEARCH_APPS.lock().unwrap() = apps;
-}
-
-/// The search inside the chosen app (its SEARCH screen with the query), or the TV's
-/// own search when none is chosen or the app does not take it.
-fn search_script(app: &str, q: &str) -> Option<String> {
-    if app.is_empty() || !valid_package(app) {
+/// «… на кинопоиске» → («…», «кинопоиске»): the app named at the end. A TV
+/// (телевизор, проектор…) is not an app. The rest of the phrase is the query.
+pub fn split_app_suffix(text: &str) -> Option<(String, String)> {
+    const TV: [&str; 14] = [
+        "телевизор", "телевизора", "телевизоре", "телевизору", "телек", "телеке", "телик", "телике", "тв", "тиви",
+        "проектор", "проектора", "проекторе", "приставке",
+    ];
+    let t = text.trim();
+    let at = t.rfind(" на ")?;
+    let (head, tail) = t.split_at(at);
+    let app = tail.trim_start().strip_prefix("на ")?.trim();
+    if app.is_empty() || app.split_whitespace().count() > 3 || TV.contains(&app.split_whitespace().next().unwrap_or("")) {
         return None;
     }
-    match search_deeplink(app, q) {
-        // `-p`: exactly the chosen app, not another one that also takes the link.
-        Some(uri) => Some(format!("am start -a android.intent.action.VIEW -d {} -p {app}", adb::quote(&uri))),
-        // The plain SEARCH intent: apps made for Android TV search rarely declare it
-        // for other apps (no CATEGORY_DEFAULT), so the caller falls back to the TV's
-        // own search when «am start» finds no activity.
-        None => Some(format!("am start -a android.intent.action.SEARCH -p {app} --es query {}", adb::quote(q))),
+    let head = head.trim();
+    (!head.is_empty()).then(|| (head.to_owned(), app.to_owned()))
+}
+
+/// The search inside the app named by the user: Kinopoisk's and YouTube's own
+/// screens, Zona's film card (its public search API); another app — the SEARCH
+/// intent. An error means «no search here»: the caller opens the TV's own search.
+fn search_in_app(sh: &dyn Fn(&str) -> Result<String, String>, pkg: &str, q: &str) -> Result<String, String> {
+    if pkg == "mobi.zona" {
+        let (id, name) = zona_search(q)?;
+        start_view(sh, pkg, &zona_program_uri(id))?;
+        return Ok(format!("Нашла «{name}» в Zona"));
     }
+    if let Some(uri) = search_deeplink(pkg, q) {
+        start_view(sh, pkg, &uri)?;
+        return Ok(format!("Ищу {q} в {}", label(pkg)));
+    }
+    // The SEARCH intent: Android TV apps rarely declare it for other apps, so
+    // «am start» usually finds no activity — that is the caller's fallback.
+    let cmd = format!("am start -a android.intent.action.SEARCH -p {pkg} --es query {}", adb::quote(q));
+    match sh(&cmd) {
+        Ok(out) if !out.contains("Error") => Ok(format!("Ищу {q} в {}", label(pkg))),
+        Ok(out) => Err(format!("{pkg} does not search ({})", out.trim())),
+        Err(e) => Err(e),
+    }
+}
+
+/// Opens an address exactly in the app (`-p`: not another app that also takes it).
+fn start_view(sh: &dyn Fn(&str) -> Result<String, String>, pkg: &str, uri: &str) -> Result<(), String> {
+    let out = sh(&format!("am start -a android.intent.action.VIEW -d {} -p {pkg}", adb::quote(uri)))?;
+    if out.contains("Error") {
+        Err(out.trim().to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+/// The TV app's film card, as its own deeplink handler expects it.
+fn zona_program_uri(id: i64) -> String {
+    format!("http://mobi.zona/program/{id}")
+}
+
+/// Zona's public search (no login): the first film/series and its id; the TV app
+/// opens `http://mobi.zona/program/<id>`. Two API hosts, as the app does.
+fn zona_search(q: &str) -> Result<(i64, String), String> {
+    let query = percent_encode_query(q);
+    let mut last = String::new();
+    for host in ["apir1.mzona.net", "apir0.mzona.net"] {
+        let url = format!("https://{host}/search?app_type=zona&query={query}&limit=10&offset=0");
+        let resp = match ureq::get(&url).timeout(Duration::from_secs(10)).call() {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("{host}: {e}");
+                continue;
+            }
+        };
+        let json: serde_json::Value = match resp.into_json() {
+            Ok(v) => v,
+            Err(e) => {
+                last = format!("{host}: {e}");
+                continue;
+            }
+        };
+        let Some(first) = json.get("data").and_then(|v| v.as_array()).and_then(|a| a.first()) else {
+            return Err("Zona: ничего не найдено".into());
+        };
+        let Some(id) = first.get("id").and_then(|v| v.as_i64()) else {
+            return Err("Zona: в ответе нет id".into());
+        };
+        let name = first.get("name").and_then(|v| v.as_str()).unwrap_or(q).to_owned();
+        return Ok((id, name));
+    }
+    Err(format!("Zona API: {last}"))
 }
 
 /// Apps whose search screen has an address of its own (checked on real TVs):
@@ -629,6 +704,7 @@ mod tests {
         assert_eq!(label("com.google.android.youtube.tv"), "YouTube");
         assert_eq!(label("com.google.android.youtube.tvmusic"), "YouTube Music");
         assert_eq!(label("ru.kinopoisk.tv"), "Кинопоиск");
+        assert_eq!(label("mobi.zona"), "Zona");
         assert_eq!(label("com.android.vending"), "Google Play");
         assert_eq!(label("com.example.wink.tv"), "Wink");
         // Unknown: the telling part of the name, the package after it.
@@ -646,11 +722,14 @@ mod tests {
             "org.videolan.vlc",
             "com.android.tv.settings",
             "tv.okko.androidtv",
+            "mobi.zona",
         ]
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
         assert_eq!(find_package("ютуб", &pk).as_deref(), Some("com.google.android.youtube.tv"));
+        assert_eq!(find_package("зоне", &pk).as_deref(), Some("mobi.zona"));
+        assert_eq!(find_package("зону", &pk).as_deref(), Some("mobi.zona"));
         assert_eq!(find_package("кинопоиск", &pk).as_deref(), Some("ru.kinopoisk.tv"));
         assert_eq!(find_package("иви", &pk).as_deref(), Some("ru.ivi.client"));
         assert_eq!(find_package("нетфликс", &pk).as_deref(), Some("com.netflix.ninja"));
@@ -669,30 +748,47 @@ mod tests {
     }
 
     #[test]
-    fn searches_in_the_chosen_app() {
+    fn app_suffix_is_taken_from_the_phrase() {
+        assert_eq!(
+            split_app_suffix("найди фильм колобок на кинопоиске"),
+            Some(("найди фильм колобок".into(), "кинопоиске".into()))
+        );
+        assert_eq!(
+            split_app_suffix("включи фильм колобок на зоне"),
+            Some(("включи фильм колобок".into(), "зоне".into()))
+        );
+        assert_eq!(
+            split_app_suffix("найди фильм колобок на смарт тьюбе"),
+            Some(("найди фильм колобок".into(), "смарт тьюбе".into()))
+        );
+        assert_eq!(split_app_suffix("найди фильм колобок"), None, "no app");
+        assert_eq!(split_app_suffix("найди фильм колобок на телевизоре"), None, "the TV is not an app");
+        assert_eq!(split_app_suffix("включи колобка на зоне"), Some(("включи колобка".into(), "зоне".into())));
+    }
+
+    #[test]
+    fn searches_in_the_named_app() {
         // Kinopoisk's own search screen: the SEARCH intent is not declared for other
         // apps (no CATEGORY_DEFAULT), its deeplink is — checked on a real TV.
-        let kp = search_script("ru.kinopoisk.tv", "колобок 2").unwrap();
-        assert_eq!(
-            kp,
-            "am start -a android.intent.action.VIEW -d 'kpatv://home?page=search&search_query=%D0%BA%D0%BE%D0%BB%D0%BE%D0%B1%D0%BE%D0%BA%202' -p ru.kinopoisk.tv"
-        );
+        let kp = search_deeplink("ru.kinopoisk.tv", "колобок 2").unwrap();
+        assert_eq!(kp, "kpatv://home?page=search&search_query=%D0%BA%D0%BE%D0%BB%D0%BE%D0%B1%D0%BE%D0%BA%202");
         // YouTube and SmartTube open their results by the site's address.
         for app in ["com.google.android.youtube.tv", "org.smarttube.stable", "com.liskovsoft.smarttubetv.beta"] {
-            let yt = search_script(app, "котики").unwrap();
-            assert!(yt.contains("https://www.youtube.com/results?search_query=%D0%BA%D0%BE%D1%82%D0%B8%D0%BA%D0%B8"), "{yt}");
+            let yt = search_deeplink(app, "котики").unwrap();
+            assert!(yt.starts_with("https://www.youtube.com/results?search_query=%D0%BA%D0%BE%D1%82%D0%B8%D0%BA%D0%B8"), "{yt}");
         }
-        // YouTube Music is not the video search: the SEARCH intent, then the TV's.
-        assert!(search_script("com.google.android.youtube.tvmusic", "котики").unwrap().contains("android.intent.action.SEARCH"));
-        // Another app: the SEARCH intent, and the caller falls back to the TV's search.
-        let other = search_script("tv.okko.androidtv", "колобок").unwrap();
-        assert_eq!(other, "am start -a android.intent.action.SEARCH -p tv.okko.androidtv --es query 'колобок'");
-        assert!(search_script("", "колобок").is_none(), "no app: the TV's own search");
-        assert!(search_script("x; reboot", "колобок").is_none(), "only a package name goes into the shell");
-        for s in [kp, other, global_search("it's")] {
+        // YouTube Music is not the video search.
+        assert!(search_deeplink("com.google.android.youtube.tvmusic", "котики").is_none());
+        // Zona: its film card (the API itself is checked on a real TV).
+        assert_eq!(zona_program_uri(843042), "http://mobi.zona/program/843042");
+        // Only a package name goes into the shell; the commands are valid shell.
+        let view = format!("am start -a android.intent.action.VIEW -d {} -p ru.kinopoisk.tv", adb::quote(&kp));
+        let search = format!("am start -a android.intent.action.SEARCH -p tv.okko.androidtv --es query {}", adb::quote("колобок"));
+        for s in [view, search, global_search("it's")] {
             let ok = std::process::Command::new("sh").arg("-n").arg("-c").arg(&s).status().unwrap().success();
             assert!(ok, "{s}");
         }
+        assert!(!valid_package("x; reboot"), "only a package name goes into the shell");
     }
 
     #[test]
