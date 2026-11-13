@@ -518,8 +518,48 @@ pub fn set_search_apps(apps: std::collections::BTreeMap<String, String>) {
 /// The search inside the chosen app (its SEARCH screen with the query), or the TV's
 /// own search when none is chosen or the app does not take it.
 fn search_script(app: &str, q: &str) -> Option<String> {
-    (!app.is_empty() && valid_package(app))
-        .then(|| format!("am start -a android.intent.action.SEARCH -p {app} --es query {}", adb::quote(q)))
+    if app.is_empty() || !valid_package(app) {
+        return None;
+    }
+    match search_deeplink(app, q) {
+        // `-p`: exactly the chosen app, not another one that also takes the link.
+        Some(uri) => Some(format!("am start -a android.intent.action.VIEW -d {} -p {app}", adb::quote(&uri))),
+        // The plain SEARCH intent: apps made for Android TV search rarely declare it
+        // for other apps (no CATEGORY_DEFAULT), so the caller falls back to the TV's
+        // own search when «am start» finds no activity.
+        None => Some(format!("am start -a android.intent.action.SEARCH -p {app} --es query {}", adb::quote(q))),
+    }
+}
+
+/// Apps whose search screen has an address of its own (checked on real TVs):
+/// Kinopoisk's `kpatv://home?page=search&search_query=…` and YouTube (also
+/// YouTube-based SmartTube) — the site's results page. None: the SEARCH intent.
+fn search_deeplink(app: &str, q: &str) -> Option<String> {
+    let q = percent_encode_query(q);
+    let p = app.to_ascii_lowercase();
+    if p == "ru.kinopoisk.tv" {
+        return Some(format!("kpatv://home?page=search&search_query={q}"));
+    }
+    // YouTube Music has its own package names and its search is not the video one.
+    if p.contains("youtube.tvmusic") || p.contains("youtube.music") {
+        return None;
+    }
+    if p.contains("youtube") || p.contains("smarttube") {
+        return Some(format!("https://www.youtube.com/results?search_query={q}"));
+    }
+    None
+}
+
+/// Text for a URI query: everything but the unreserved characters is
+/// percent-encoded (`пробел` → `%20`, not `+`: Uri.getQueryParameter does not
+/// turn `+` back into a space on every Android version).
+fn percent_encode_query(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn global_search(q: &str) -> String {
@@ -630,11 +670,26 @@ mod tests {
 
     #[test]
     fn searches_in_the_chosen_app() {
-        let script = search_script("ru.kinopoisk.tv", "колобок 2").unwrap();
-        assert_eq!(script, "am start -a android.intent.action.SEARCH -p ru.kinopoisk.tv --es query 'колобок 2'");
+        // Kinopoisk's own search screen: the SEARCH intent is not declared for other
+        // apps (no CATEGORY_DEFAULT), its deeplink is — checked on a real TV.
+        let kp = search_script("ru.kinopoisk.tv", "колобок 2").unwrap();
+        assert_eq!(
+            kp,
+            "am start -a android.intent.action.VIEW -d 'kpatv://home?page=search&search_query=%D0%BA%D0%BE%D0%BB%D0%BE%D0%B1%D0%BE%D0%BA%202' -p ru.kinopoisk.tv"
+        );
+        // YouTube and SmartTube open their results by the site's address.
+        for app in ["com.google.android.youtube.tv", "org.smarttube.stable", "com.liskovsoft.smarttubetv.beta"] {
+            let yt = search_script(app, "котики").unwrap();
+            assert!(yt.contains("https://www.youtube.com/results?search_query=%D0%BA%D0%BE%D1%82%D0%B8%D0%BA%D0%B8"), "{yt}");
+        }
+        // YouTube Music is not the video search: the SEARCH intent, then the TV's.
+        assert!(search_script("com.google.android.youtube.tvmusic", "котики").unwrap().contains("android.intent.action.SEARCH"));
+        // Another app: the SEARCH intent, and the caller falls back to the TV's search.
+        let other = search_script("tv.okko.androidtv", "колобок").unwrap();
+        assert_eq!(other, "am start -a android.intent.action.SEARCH -p tv.okko.androidtv --es query 'колобок'");
         assert!(search_script("", "колобок").is_none(), "no app: the TV's own search");
         assert!(search_script("x; reboot", "колобок").is_none(), "only a package name goes into the shell");
-        for s in [script, global_search("it's")] {
+        for s in [kp, other, global_search("it's")] {
             let ok = std::process::Command::new("sh").arg("-n").arg("-c").arg(&s).status().unwrap().success();
             assert!(ok, "{s}");
         }
