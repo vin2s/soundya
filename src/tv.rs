@@ -35,6 +35,8 @@ const APPS: &[(&str, &[&str], &[&str])] = &[
     ("KinoPub", &["кинопаб", "kinopub"], &["kinopub"]),
     ("HD VideoBox", &["видеобокс", "hd videobox"], &["videobox"]),
     ("SmartTube", &["смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "смарт тьюбе", "smarttube", "smart tube"], &["liskovsoft.smarttubetv", "smarttube"]),
+    ("Free TV", &["фри ти ви", "фритиви", "free tv", "free-tv", "atx", "атикс"], &["ru.cn.atx"]),
+    ("LMD", &["лмд", "lmd", "лм делюкс", "lm deluxe"], &["lazycatsoftware.lmd"]),
     ("Zona", &["зона", "зону", "зоне", "zona"], &["zona"]),
     ("VPN", &["впн", "vpn", "випиэн"], &["vpn", "wireguard", "amnezia", "outline", "hiddify", "v2ray", "nekobox", "openvpn"]),
 ];
@@ -47,7 +49,13 @@ pub fn app_named(said: &str) -> bool {
 
 /// Apps only the TV has: said without «на проекторе», the phrase is still the TV's.
 pub fn tv_only_app(said: &str) -> bool {
-    ["смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "smarttube", "smart tube"].iter().any(|n| said.contains(n))
+    [
+        "смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "smarttube", "smart tube",
+        "фри ти ви", "фритиви", "free tv", "free-tv", "atx", "атикс",
+        "лмд", "lmd", "лм делюкс", "lm deluxe",
+    ]
+    .iter()
+    .any(|n| said.contains(n))
 }
 
 // ---------------------------------------------------------------- the screen
@@ -347,6 +355,15 @@ fn key(dir: &Path) -> Result<std::sync::Arc<adb::Key>, String> {
     Ok(k)
 }
 
+/// Wakes the TV and dismisses its screensaver; a sleeping TV needs a moment.
+fn wake(sh: &dyn Fn(&str) -> Result<String, String>) {
+    let asleep = sh("dumpsys power | grep -m1 mWakefulness=").map(|o| !o.contains("Awake")).unwrap_or(false);
+    let _ = sh("input keyevent KEYCODE_WAKEUP");
+    if asleep {
+        std::thread::sleep(Duration::from_millis(1500));
+    }
+}
+
 pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> {
     let key = key(dir)?;
     // Waiting for «Разрешить» makes sense only for the check from the settings page.
@@ -367,11 +384,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
         }
         TvAction::Search(q, app) => {
             // «Алиса, найди фильм Колобок»: the TV on first, then the search (#SY-F351993A).
-            let asleep = sh("dumpsys power | grep -m1 mWakefulness=").map(|o| !o.contains("Awake")).unwrap_or(false);
-            if asleep {
-                let _ = sh("input keyevent KEYCODE_WAKEUP");
-                std::thread::sleep(Duration::from_millis(1500));
-            }
+            wake(&sh);
             // No app named — the TV's own (Google) search, as asked.
             let Some(spoken) = app else {
                 return sh(&global_search(q)).map(|_| format!("Ищу {q} в общем поиске"));
@@ -417,6 +430,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             if !valid_package(pkg) {
                 return Err("неверное имя пакета".into());
             }
+            wake(&sh);
             let out = sh(&launch_script(pkg))?;
             if out.contains("Error") || out.contains("No activities") || out.contains("Exception") {
                 return Err(format!("Телевизор не открыл {pkg}"));
@@ -450,6 +464,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             }
         }
         TvAction::OpenIn(app, section) => {
+            wake(&sh);
             open_app(&sh, app)?;
             // The app's first screen takes a few seconds.
             for attempt in 0..4 {
@@ -480,6 +495,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             }
         }
         TvAction::OpenAndStart(app) => {
+            wake(&sh);
             open_app(&sh, app)?;
             std::thread::sleep(Duration::from_millis(3500));
             let nodes = dump_screen(&sh).unwrap_or_default();
@@ -492,6 +508,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             sh("input keyevent KEYCODE_DPAD_CENTER").map(|_| format!("Открыла {app} и нажала главную кнопку"))
         }
         TvAction::Open(name) => {
+            wake(&sh);
             let list = sh("pm list packages")?;
             let packages: Vec<String> =
                 list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
@@ -539,6 +556,16 @@ pub fn split_app_suffix(text: &str) -> Option<(String, String)> {
 /// screens, Zona's film card (its public search API); another app — the SEARCH
 /// intent. An error means «no search here»: the caller opens the TV's own search.
 fn search_in_app(sh: &dyn Fn(&str) -> Result<String, String>, pkg: &str, q: &str) -> Result<String, String> {
+    // LMD's search screen is its own activity: the query is the «query» extra.
+    // It is not exported to other apps, but the TV's shell may start it.
+    if pkg == "com.lazycatsoftware.lmd" {
+        let activity = "com.lazycatsoftware.lmd/com.lazycatsoftware.lazymediadeluxe.ui.tv.activities.ActivityTvSearch";
+        let out = sh(&format!("am start -n {activity} --es query {}", adb::quote(q)))?;
+        if start_failed(&out) {
+            return Err(out.trim().to_owned());
+        }
+        return Ok(format!("Ищу {q} в LMD"));
+    }
     if pkg == "mobi.zona" {
         let (id, name) = zona_search(q)?;
         start_view(sh, pkg, &zona_program_uri(id))?;
@@ -552,16 +579,21 @@ fn search_in_app(sh: &dyn Fn(&str) -> Result<String, String>, pkg: &str, q: &str
     // «am start» usually finds no activity — that is the caller's fallback.
     let cmd = format!("am start -a android.intent.action.SEARCH -p {pkg} --es query {}", adb::quote(q));
     match sh(&cmd) {
-        Ok(out) if !out.contains("Error") => Ok(format!("Ищу {q} в {}", label(pkg))),
+        Ok(out) if !start_failed(&out) => Ok(format!("Ищу {q} в {}", label(pkg))),
         Ok(out) => Err(format!("{pkg} does not search ({})", out.trim())),
         Err(e) => Err(e),
     }
 }
 
+/// «am start» did not start anything: no activity, no permission, an exception.
+fn start_failed(out: &str) -> bool {
+    ["Error", "Exception", "Permission Denial"].iter().any(|e| out.contains(e))
+}
+
 /// Opens an address exactly in the app (`-p`: not another app that also takes it).
 fn start_view(sh: &dyn Fn(&str) -> Result<String, String>, pkg: &str, uri: &str) -> Result<(), String> {
     let out = sh(&format!("am start -a android.intent.action.VIEW -d {} -p {pkg}", adb::quote(uri)))?;
-    if out.contains("Error") {
+    if start_failed(&out) {
         Err(out.trim().to_owned())
     } else {
         Ok(())
@@ -705,6 +737,8 @@ mod tests {
         assert_eq!(label("com.google.android.youtube.tvmusic"), "YouTube Music");
         assert_eq!(label("ru.kinopoisk.tv"), "Кинопоиск");
         assert_eq!(label("mobi.zona"), "Zona");
+        assert_eq!(label("ru.cn.atx"), "Free TV");
+        assert_eq!(label("com.lazycatsoftware.lmd"), "LMD");
         assert_eq!(label("com.android.vending"), "Google Play");
         assert_eq!(label("com.example.wink.tv"), "Wink");
         // Unknown: the telling part of the name, the package after it.
@@ -723,6 +757,8 @@ mod tests {
             "com.android.tv.settings",
             "tv.okko.androidtv",
             "mobi.zona",
+            "ru.cn.atx",
+            "com.lazycatsoftware.lmd",
         ]
         .iter()
         .map(|s| (*s).to_owned())
@@ -730,6 +766,9 @@ mod tests {
         assert_eq!(find_package("ютуб", &pk).as_deref(), Some("com.google.android.youtube.tv"));
         assert_eq!(find_package("зоне", &pk).as_deref(), Some("mobi.zona"));
         assert_eq!(find_package("зону", &pk).as_deref(), Some("mobi.zona"));
+        assert_eq!(find_package("фри ти ви", &pk).as_deref(), Some("ru.cn.atx"));
+        assert_eq!(find_package("free tv", &pk).as_deref(), Some("ru.cn.atx"));
+        assert_eq!(find_package("лмд", &pk).as_deref(), Some("com.lazycatsoftware.lmd"));
         assert_eq!(find_package("кинопоиск", &pk).as_deref(), Some("ru.kinopoisk.tv"));
         assert_eq!(find_package("иви", &pk).as_deref(), Some("ru.ivi.client"));
         assert_eq!(find_package("нетфликс", &pk).as_deref(), Some("com.netflix.ninja"));
@@ -789,6 +828,25 @@ mod tests {
             assert!(ok, "{s}");
         }
         assert!(!valid_package("x; reboot"), "only a package name goes into the shell");
+    }
+
+    #[test]
+    fn lmd_search_opens_its_search_screen() {
+        let cmds = std::cell::RefCell::new(Vec::new());
+        let sh = |c: &str| {
+            cmds.borrow_mut().push(c.to_owned());
+            Ok(String::new())
+        };
+        let text = search_in_app(&sh, "com.lazycatsoftware.lmd", "колобок").unwrap();
+        assert!(text.contains("LMD"), "{text}");
+        let cmds = cmds.borrow();
+        assert!(cmds[0].contains("ActivityTvSearch"), "{}", cmds[0]);
+        assert!(cmds[0].contains("--es query 'колобок'"), "{}", cmds[0]);
+        // «Включи фри ти ви» and «включи лмд» are the TV's even without its name.
+        assert!(tv_only_app("включи фри ти ви"));
+        assert!(tv_only_app("включи free tv"));
+        assert!(tv_only_app("включи лмд"));
+        assert!(!tv_only_app("включи bonobo"));
     }
 
     #[test]

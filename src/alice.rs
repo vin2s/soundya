@@ -2330,6 +2330,10 @@ mod tests {
         // The app is named: search inside it, even without «на телевизоре».
         assert_eq!(t("найди фильм колобок на кинопоиске"), Some(TvAction::Search("колобок".into(), Some("кинопоиске".into()))));
         assert_eq!(t("включи фильм колобок на зоне"), Some(TvAction::Search("колобок".into(), Some("зоне".into()))));
+        assert_eq!(t("найди фильм колобок на лмд"), Some(TvAction::Search("колобок".into(), Some("лмд".into()))));
+        // TV-only apps are opened even without «на телевизоре».
+        assert_eq!(t("включи фри ти ви"), Some(TvAction::Open("фри ти ви".into())));
+        assert_eq!(t("включи лмд"), Some(TvAction::Open("лмд".into())));
         assert_eq!(t("найди фильм колобок на кинопоиске на телевизоре"), Some(TvAction::Search("колобок".into(), Some("кинопоиске".into()))));
         // No app named: the TV's own (Google) search.
         assert_eq!(t("найди фильм колобок на телевизоре"), Some(TvAction::Search("колобок".into(), None)));
