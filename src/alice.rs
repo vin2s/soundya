@@ -1211,7 +1211,10 @@ fn app_phrase_in(n: &str) -> Option<Option<TvAction>> {
     for verb in verbs {
         if let Some(rest) = full.strip_prefix(&format!("{verb} ")) {
             let said = normalize_phrase(rest);
-            if let Some((_, pkg, mode)) = apps.iter().find(|(alias, _, _)| *alias == said) {
+            let key = crate::tv::app_name_key(&said);
+            if let Some((_, pkg, mode)) = apps.iter().find(|(alias, _, _)| {
+                *alias == said || (!key.is_empty() && crate::tv::app_name_key(alias) == key)
+            }) {
                 open_alias = Some((pkg.clone(), mode.clone()));
                 break;
             }
@@ -1227,7 +1230,10 @@ fn app_phrase_in(n: &str) -> Option<Option<TvAction>> {
         return None;
     }
     let said = normalize_phrase(&app);
-    let (_, pkg, mode) = apps.iter().find(|(alias, _, _)| *alias == said)?;
+    let key = crate::tv::app_name_key(&said);
+    let (_, pkg, mode) = apps.iter().find(|(alias, _, _)| {
+        *alias == said || (!key.is_empty() && crate::tv::app_name_key(alias) == key)
+    })?;
     if mode == "open" {
         return Some(None);
     }
@@ -2428,6 +2434,7 @@ mod tests {
             ("фри ти ви".into(), "ru.cn.atx".into(), "open".into()),
             ("телек".into(), "ru.cn.atx".into(), "open".into()),
             ("киношка".into(), "tv.okko.androidtv".into(), "search".into()),
+            ("эфм плеер".into(), "ru.fmplay".into(), "open".into()),
         ]);
         let t = |s: &str| match intent(s, false) {
             Some(Intent::Tv(a)) => Some(a),
@@ -2437,6 +2444,11 @@ mod tests {
         assert_eq!(t("Алиса, открой лнд"), Some(TvAction::OpenPackage("com.lazycatsoftware.lmd".into())));
         assert_eq!(t("включи фри ти ви"), Some(TvAction::OpenPackage("ru.cn.atx".into())));
         assert_eq!(t("включи телек на телевизоре"), Some(TvAction::OpenPackage("ru.cn.atx".into())));
+        // Alice writes «эфм плеер» as «fm player» — the loose key still matches.
+        assert_eq!(t("запусти fm player"), Some(TvAction::OpenPackage("ru.fmplay".into())));
+        assert_eq!(t("включи fm player на телевизоре"), Some(TvAction::OpenPackage("ru.fmplay".into())));
+        // But a different app name does not match it.
+        assert_eq!(t("включи fm радио"), None);
         // The search uses the exact package too, and drops the film noun.
         assert_eq!(t("найди фильм колобок на лэнд"),
             Some(TvAction::Search("колобок".into(), Some("com.lazycatsoftware.lmd".into()))));

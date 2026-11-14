@@ -55,11 +55,35 @@ pub fn set_app_phrases(list: Vec<(String, String, String)>) {
     *APP_PHRASES.lock().unwrap() = list;
 }
 
+/// A loose key for an app name: Alice may write «эфм плеер» as «fm player»,
+/// «лмд» as «lmd», «фри ти ви» as «free tv». Cyrillic is transliterated, then
+/// vowels are dropped, so both spellings meet. Used only for the user's own
+/// aliases — a whole phrase must still match, so music is not taken.
+pub fn app_name_key(said: &str) -> String {
+    let words: String = said.to_lowercase().replace('ё', "е").split_whitespace().collect::<Vec<_>>().join("");
+    let mut t = String::new();
+    for c in words.chars() {
+        let s: &str = match c {
+            'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d", 'е' | 'э' => "e", 'ж' => "zh",
+            'з' => "z", 'и' | 'й' | 'ы' => "i", 'к' => "k", 'л' => "l", 'м' => "m", 'н' => "n", 'о' => "o",
+            'п' => "p", 'р' => "r", 'с' => "s", 'т' => "t", 'у' => "u", 'ф' => "f", 'х' => "h", 'ц' => "c",
+            'ч' => "ch", 'ш' => "sh", 'щ' => "sch", 'ю' => "yu", 'я' => "ya",
+            c if c.is_ascii_alphanumeric() => {
+                t.push(c.to_ascii_lowercase());
+                continue;
+            }
+            _ => "",
+        };
+        t.push_str(s);
+    }
+    t.chars().filter(|c| !"aeiouy".contains(*c)).collect()
+}
+
 /// Does the phrase name one of the user's own TV apps? Used to tell a TV search
 /// («найди фильм … на <алиасе>») from music («… на саундклауде»).
 pub fn user_app_named(said: &str) -> bool {
-    let s = crate::alice::normalize_phrase(said);
-    APP_PHRASES.lock().unwrap().iter().any(|(alias, _, _)| *alias == s)
+    let key = app_name_key(said);
+    APP_PHRASES.lock().unwrap().iter().any(|(alias, _, _)| app_name_key(alias) == key)
 }
 
 /// The user's app names: (alias, package, mode), for the voice parser.
