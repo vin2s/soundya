@@ -3112,13 +3112,25 @@ function renderTvPhrases() {
   });
 }
 function addTvPhrase() { tvPhraseList.push({ phrase: '', pkg: '', mode: 'both' }); renderTvPhrases(); }
-async function loadTvPhraseApps() {
-  busy($('tvphrasemsg'), 'Спрашиваю телевизор…');
+async function fetchTvPhraseApps(quiet) {
+  if (!quiet) busy($('tvphrasemsg'), 'Спрашиваю телевизор…');
   const r = await postJSON('tv apps');
-  if (r.error || !r.apps) { show($('tvphrasemsg'), 'error: ' + (r.error || 'телевизор не ответил')); return; }
+  if (r.error || !r.apps) {
+    if (!quiet) show($('tvphrasemsg'), 'error: ' + (r.error || 'телевизор не ответил'));
+    return false;
+  }
   tvPhraseApps = { apps: r.apps, names: r.names || {} };
   renderTvPhrases();
-  show($('tvphrasemsg'), `OK: приложений на телевизоре: ${r.apps.length}`);
+  if (!quiet) show($('tvphrasemsg'), `OK: приложений на телевизоре: ${r.apps.length}`);
+  return true;
+}
+function loadTvPhraseApps() { return fetchTvPhraseApps(false); }
+// The list is needed only for the select: load it once when the «Устройства»
+// section is opened, silently (a failure just leaves the button for a retry).
+let tvPhraseAppsRetryAt = 0;
+async function ensureTvPhraseApps() {
+  if (tvPhraseApps || !$('tvphrases') || Date.now() < tvPhraseAppsRetryAt) return;
+  if (!await fetchTvPhraseApps(true)) tvPhraseAppsRetryAt = Date.now() + 30000;
 }
 async function saveTvPhrases() {
   const list = tvPhraseList.filter(a => (a.phrase || '').trim() && (a.pkg || '').trim());
@@ -3133,7 +3145,8 @@ async function saveTvPhrases() {
   tvPhraseList = list.map(a => ({ phrase: (a.phrase || '').trim(), pkg: a.pkg, mode: a.mode || 'both' }));
   document.activeElement && document.activeElement.blur();
   renderTvPhrases();
-  settingsLoaded = false; refresh();
+  // No settingsLoaded = false here: a status cached before the save would
+  // overwrite the list we have just confirmed. The next page load re-reads it.
 }
 async function tryMacro() {
   if (!macroSteps.length) { show($('macromsg'), 'error: добавьте шаги'); return; }
@@ -5505,6 +5518,7 @@ async function refresh() {
     renderDevs('tv', settings.tvs_more || []);
     tvPhraseList = (settings.tv_app_phrases || []).map(a => ({ phrase: a.phrase || '', pkg: a.pkg || '', mode: a.mode || 'both' }));
     renderTvPhrases();
+    ensureTvPhraseApps();
     $('pctoken').value = settings.pc_token || '';
     $('pcmac').value = settings.pc_mac || '';
     renderContacts(settings.pc_contacts || []);
