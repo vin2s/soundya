@@ -3125,7 +3125,14 @@ async function saveTvPhrases() {
   if (tvPhraseList.length && list.length !== tvPhraseList.length) {
     show($('tvphrasemsg'), 'error: заполните фразу и выберите приложение в каждой строке'); return;
   }
-  show($('tvphrasemsg'), await post('/api/settings', JSON.stringify({ tv_app_phrases: list })));
+  const saved = await post('/api/settings', JSON.stringify({ tv_app_phrases: list }));
+  if (saved.startsWith('error')) { show($('tvphrasemsg'), saved); return; }
+  show($('tvphrasemsg'), `Сохранено фраз: ${list.length}`);
+  // The form is guarded by refreshBusy and only re-rendered on a fresh status:
+  // show the saved rows at once, otherwise they appear only after a page reload.
+  tvPhraseList = list.map(a => ({ phrase: (a.phrase || '').trim(), pkg: a.pkg, mode: a.mode || 'both' }));
+  document.activeElement && document.activeElement.blur();
+  renderTvPhrases();
   settingsLoaded = false; refresh();
 }
 async function tryMacro() {
