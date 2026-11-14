@@ -401,6 +401,23 @@ pub struct Settings {
     /// Voice macros: a phrase that runs a script of panel commands.
     #[serde(default)]
     pub macros: Vec<Macro>,
+    /// «Свои фразы для приложений»: how the user names a TV app, the package
+    /// picked from the TV, and what to do with it (open / search / both).
+    #[serde(default)]
+    pub tv_app_phrases: Vec<AppPhrase>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppPhrase {
+    /// Names as said, comma-separated: «лнд, лэнд, делюкс».
+    #[serde(default)]
+    pub phrase: String,
+    /// Exact package name from `tv apps` (never guessed from the spoken name).
+    #[serde(default)]
+    pub pkg: String,
+    /// "open", "search" or "both".
+    #[serde(default)]
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -690,6 +707,7 @@ impl Default for Settings {
             share_heard: false,
             tv_host: String::new(),
             macros: Vec::new(),
+            tv_app_phrases: Vec::new(),
             bypass: String::new(),
             proxy_on: true,
             bypass_on: true,

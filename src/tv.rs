@@ -36,7 +36,7 @@ const APPS: &[(&str, &[&str], &[&str])] = &[
     ("HD VideoBox", &["видеобокс", "hd videobox"], &["videobox"]),
     ("SmartTube", &["смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "смарт тьюбе", "smarttube", "smart tube"], &["liskovsoft.smarttubetv", "smarttube"]),
     ("Free TV", &["фри ти ви", "фритиви", "free tv", "free-tv", "atx", "атикс"], &["ru.cn.atx"]),
-    ("LMD", &["лмд", "lmd", "лм делюкс", "lm deluxe"], &["lazycatsoftware.lmd"]),
+    ("LMD", &["лмд", "лнд", "лэнд", "делюкс", "lmd", "лм делюкс", "lm deluxe"], &["lazycatsoftware.lmd"]),
     ("Zona", &["зона", "зону", "зоне", "zona"], &["zona"]),
     ("VPN", &["впн", "vpn", "випиэн"], &["vpn", "wireguard", "amnezia", "outline", "hiddify", "v2ray", "nekobox", "openvpn"]),
 ];
@@ -45,6 +45,26 @@ const APPS: &[(&str, &[&str], &[&str])] = &[
 pub fn app_named(said: &str) -> bool {
     let s = said.trim();
     APPS.iter().any(|(_, names, _)| names.iter().any(|n| s.starts_with(n)))
+}
+
+/// «Свои фразы для приложений»: (normalized alias, package, open/search/both),
+/// kept in sync from the settings. The column's names come from `tv apps`.
+static APP_PHRASES: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_app_phrases(list: Vec<(String, String, String)>) {
+    *APP_PHRASES.lock().unwrap() = list;
+}
+
+/// Does the phrase name one of the user's own TV apps? Used to tell a TV search
+/// («найди фильм … на <алиасе>») from music («… на саундклауде»).
+pub fn user_app_named(said: &str) -> bool {
+    let s = crate::alice::normalize_phrase(said);
+    APP_PHRASES.lock().unwrap().iter().any(|(alias, _, _)| *alias == s)
+}
+
+/// The user's app names: (alias, package, mode), for the voice parser.
+pub fn app_phrases() -> Vec<(String, String, String)> {
+    APP_PHRASES.lock().unwrap().clone()
 }
 
 /// Apps only the TV has: said without «на проекторе», the phrase is still the TV's.
@@ -389,11 +409,14 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             let Some(spoken) = app else {
                 return sh(&global_search(q)).map(|_| format!("Ищу {q} в общем поиске"));
             };
-            let list = sh("pm list packages")?;
-            let packages: Vec<String> =
-                list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
-            let Some(pkg) = find_package(spoken, &packages) else {
-                return Err(format!("Не нашла на телевизоре приложение {spoken}"));
+            // A user phrase stores the exact package: no guessing by its name.
+            let pkg = if valid_package(spoken) {
+                spoken.clone()
+            } else {
+                let list = sh("pm list packages")?;
+                let packages: Vec<String> =
+                    list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
+                find_package(spoken, &packages).ok_or_else(|| format!("Не нашла на телевизоре приложение {spoken}"))?
             };
             match search_in_app(&sh, &pkg, q) {
                 Ok(text) => Ok(text),

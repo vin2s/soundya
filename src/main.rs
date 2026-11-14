@@ -136,6 +136,8 @@ pub struct Shared {
     contacts: Mutex<Vec<String>>,
     /// Voice macros as (normalized phrase, script), for matching spoken lines.
     macros: Mutex<Vec<(String, String)>>,
+    /// «Свои фразы для приложений»: (normalized alias, package, open/search/both).
+    pub app_phrases: Mutex<Vec<(String, String, String)>>,
     active: AtomicBool,
     queue: AtomicBool,
     status: Mutex<String>,
@@ -216,6 +218,9 @@ impl Shared {
     }
     pub fn macros(&self) -> Vec<(String, String)> {
         self.macros.lock().unwrap().clone()
+    }
+    pub fn app_phrases(&self) -> Vec<(String, String, String)> {
+        self.app_phrases.lock().unwrap().clone()
     }
 }
 
@@ -464,6 +469,7 @@ impl Controller {
             "tv_name": self.settings.tv_name,
             "tvs_more": self.settings.tvs_more,
             "tv_active": self.settings.active_tv().map(|t| t.name).unwrap_or_default(),
+            "tv_app_phrases": self.settings.tv_app_phrases,
             "pc_name": self.settings.pc_name,
             "pcs_more": self.settings.masked_pcs_more(),
             "macros": self.settings.macros,
@@ -1000,6 +1006,21 @@ impl Controller {
         // Macros are managed by the «macro» command, not this form: keep them.
         new.macros = self.settings.macros.clone();
         *self.shared.macros.lock().unwrap() = macro_list(&new);
+        // «Свои фразы для приложений»: drop empty rows and anything that is not
+        // a package name (it goes into an ADB shell command).
+        new.tv_app_phrases = std::mem::take(&mut new.tv_app_phrases)
+            .into_iter()
+            .map(|a| settings::AppPhrase {
+                phrase: a.phrase.trim().chars().take(200).collect(),
+                pkg: a.pkg.trim().to_owned(),
+                mode: match a.mode.as_str() { "open" | "search" => a.mode, _ => "both".into() },
+            })
+            .filter(|a| !a.phrase.is_empty() && tv::valid_package(&a.pkg))
+            .take(50)
+            .collect();
+        let phrases = app_phrase_list(&new);
+        *self.shared.app_phrases.lock().unwrap() = phrases.clone();
+        tv::set_app_phrases(phrases);
         let token_changed = new.token != self.settings.token;
         let refresh_changed = new.sc_refresh != self.settings.sc_refresh;
         new.proxy = self.real_proxy(&new.proxy);
@@ -3338,6 +3359,30 @@ fn macro_list(settings: &Settings) -> Vec<(String, String)> {
         .collect()
 }
 
+/// «Свои фразы для приложений»: one entry per comma-separated name, the exact
+/// package and what to do. The names are compared with the whole spoken phrase.
+pub fn app_phrase_list(settings: &Settings) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for a in &settings.tv_app_phrases {
+        let pkg = a.pkg.trim();
+        if pkg.is_empty() || !tv::valid_package(pkg) {
+            continue;
+        }
+        let mode = match a.mode.as_str() {
+            "open" | "search" => a.mode.as_str(),
+            _ => "both",
+        };
+        for name in a.phrase.split([',', ';', '|']) {
+            let n = alice::normalize_phrase(name);
+            if n.is_empty() || out.iter().any(|(p, _, _): &(String, String, String)| *p == n) {
+                continue;
+            }
+            out.push((n, pkg.to_owned(), mode.to_owned()));
+        }
+    }
+    out
+}
+
 /// Keeps sound-card errors on flash (`audio-errors.log`), with the ALSA setup,
 /// so they can be diagnosed later even after a reboot.
 fn note_audio_error(dir: &std::path::Path, device: &str, e: &str) {
@@ -3480,6 +3525,7 @@ fn daemon() {
         pc: AtomicBool::new(settings.pc_configured()),
         contacts: Mutex::new(contact_names(&settings)),
         macros: Mutex::new(macro_list(&settings)),
+        app_phrases: Mutex::new(app_phrase_list(&settings)),
         active: AtomicBool::new(false),
         queue: AtomicBool::new(false),
         status: Mutex::new("stopped".into()),
@@ -3534,6 +3580,7 @@ fn daemon() {
     adbkeep::configure(settings.adb_keep);
     alice::set_tv(settings.tv_configured());
     alice::set_devices(device_names(&settings));
+    tv::set_app_phrases(app_phrase_list(&settings));
     alice::set_pc_rules(pc_rules(&settings));
     alarm::set_morning(settings.morning_on);
     alarm::set_own(settings.alarm_own);
@@ -3836,5 +3883,24 @@ mod macro_tests {
         assert_eq!(super::login_state(true, false, false), "checking");
         assert_eq!(super::login_state(false, true, false), "none");
         assert_eq!(super::norm_phrase("Алиса, Включи вечерний режим, пожалуйста!"), "включи вечерний режим");
+    }
+
+    #[test]
+    fn own_app_phrases_split_names_and_keep_exact_packages() {
+        use crate::settings::{AppPhrase, Settings};
+        let mut s = Settings::default();
+        s.tv_app_phrases = vec![
+            AppPhrase { phrase: "лнд, лэнд, делюкс".into(), pkg: "com.lazycatsoftware.lmd".into(), mode: "both".into() },
+            AppPhrase { phrase: "фри ти ви".into(), pkg: "ru.cn.atx".into(), mode: "open".into() },
+            AppPhrase { phrase: "плохое".into(), pkg: "x; reboot".into(), mode: "both".into() },
+            AppPhrase { phrase: "пустое".into(), pkg: "".into(), mode: "both".into() },
+        ];
+        let list = super::app_phrase_list(&s);
+        assert_eq!(list.len(), 4, "three names for LMD + Free TV; invalid rows dropped");
+        assert!(list.contains(&("лнд".into(), "com.lazycatsoftware.lmd".into(), "both".into())));
+        assert!(list.contains(&("лэнд".into(), "com.lazycatsoftware.lmd".into(), "both".into())));
+        assert!(list.contains(&("делюкс".into(), "com.lazycatsoftware.lmd".into(), "both".into())));
+        assert!(list.contains(&("фри ти ви".into(), "ru.cn.atx".into(), "open".into())));
+        assert!(list.iter().all(|(_, p, _)| crate::tv::valid_package(p)), "only package names reach the shell");
     }
 }

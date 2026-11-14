@@ -331,7 +331,7 @@ fn tv_app_search(n: &str) -> Option<TvAction> {
     }
     // «включи мой плейлист в дорогу на саундклауде» is music, not a TV search:
     // an app unknown to the TV list needs the film noun to make the phrase the TV's.
-    if !film && !crate::tv::app_named(&app) && !crate::tv::tv_only_app(&app) {
+    if !film && !crate::tv::app_named(&app) && !crate::tv::tv_only_app(&app) && !crate::tv::user_app_named(&app) {
         return None;
     }
     let q = q.trim();
@@ -1172,7 +1172,82 @@ fn device_in(n: &str, devices: &[(String, bool)]) -> Option<(String, bool, Strin
     None
 }
 
+/// «Свои фразы для приложений»: a whole phrase that names the app opens it;
+/// «найди фильм … на <алиасе>» searches inside it. Both are strict: a musical
+/// phrase with the same words but a tail («включи bonobo на кухне») is not taken.
+/// Returns `Some(Some(action))` for a match, `Some(None)` when the phrase names
+/// one of the user's apps but its mode forbids the action (the built-in parsers
+/// must not take such a phrase), `None` when it is not a user phrase at all.
+fn app_phrase_intent(text: &str) -> Option<Option<TvAction>> {
+    let n = normalize(text);
+    // «… на телевизоре» is how the panel sends a phrase; the same app can be
+    // asked without it. Strip only the trailing TV mention — `strip_tv` would
+    // eat an alias that happens to be «телек» in the middle of the phrase.
+    const TV_TAILS: [&str; 7] = [
+        " на телевизоре", " на проекторе", " на приставке", " на тв", " в телевизоре", " в проекторе", " на телике",
+    ];
+    let mut untv = n.clone();
+    for tail in TV_TAILS {
+        if let Some(head) = untv.strip_suffix(tail) {
+            untv = head.to_owned();
+            break;
+        }
+    }
+    if let Some(found) = app_phrase_in(&untv) {
+        return Some(found);
+    }
+    app_phrase_in(&n)
+}
+
+fn app_phrase_in(n: &str) -> Option<Option<TvAction>> {
+    let full = normalize_phrase(n);
+    let apps = crate::tv::app_phrases();
+    if apps.is_empty() || full.is_empty() {
+        return None;
+    }
+    // «открой лнд», «запусти лнд», «включи лнд» — the app itself, not a film.
+    let verbs = ["открой", "запусти", "открыть", "запустить", "включи", "поставь", "перейди", "зайди"];
+    let mut open_alias = None;
+    for verb in verbs {
+        if let Some(rest) = full.strip_prefix(&format!("{verb} ")) {
+            let said = normalize_phrase(rest);
+            if let Some((_, pkg, mode)) = apps.iter().find(|(alias, _, _)| *alias == said) {
+                open_alias = Some((pkg.clone(), mode.clone()));
+                break;
+            }
+        }
+    }
+    if let Some((pkg, mode)) = open_alias {
+        return Some((mode != "search").then(|| TvAction::OpenPackage(pkg)));
+    }
+    // «найди фильм колобок на лнд» — the query before «на <алиасе>».
+    let (query, app) = crate::tv::split_app_suffix(n)?;
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if !matches!(words.first().copied().unwrap_or(""), "найди" | "поищи" | "покажи" | "включи" | "поставь") {
+        return None;
+    }
+    let said = normalize_phrase(&app);
+    let (_, pkg, mode) = apps.iter().find(|(alias, _, _)| *alias == said)?;
+    if mode == "open" {
+        return Some(None);
+    }
+    let mut q = words[1..].join(" ");
+    for noun in ["фильм ", "сериал ", "мультфильм ", "мультик ", "кино ", "фильмы ", "сериалы "] {
+        if let Some(r) = q.strip_prefix(noun) {
+            q = r.to_owned();
+            break;
+        }
+    }
+    let q = q.trim();
+    Some((!q.is_empty()).then(|| TvAction::Search(q.to_owned(), Some(pkg.clone()))))
+}
+
 pub fn intent(text: &str, keyword_only: bool) -> Option<Intent> {
+    // «Свои фразы для приложений»: the whole phrase names one of the user's apps,
+    // or asks to search a film in it. Their exact package skips all guessing.
+    if let Some(found) = app_phrase_intent(text) {
+        return found.map(Intent::Tv);
+    }
     // A TV or computer named by the user: its command, aimed at it.
     let devices = DEVICES.lock().unwrap().clone();
     if !devices.is_empty() {
@@ -2248,6 +2323,7 @@ mod tests {
         };
         let _one_at_a_time = TV_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         tv_state(|s| s.session = None);
+        crate::tv::set_app_phrases(Vec::new());
         set_tv(true);
         // The owner's words: no «на проекторе», no command before.
         assert_eq!(t("Алиса, нажми вверх"), Some(TvAction::Key(UP, 1)));
@@ -2341,6 +2417,40 @@ mod tests {
         assert_eq!(t("включи bonobo"), None);
         assert_eq!(t("открой ютуб"), None);
         assert_eq!(t("включи зону"), None);
+    }
+
+    #[test]
+    fn own_app_phrases_open_and_search_by_package() {
+        let _one_at_a_time = TV_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::tv::set_app_phrases(vec![
+            ("лнд".into(), "com.lazycatsoftware.lmd".into(), "both".into()),
+            ("лэнд".into(), "com.lazycatsoftware.lmd".into(), "both".into()),
+            ("фри ти ви".into(), "ru.cn.atx".into(), "open".into()),
+            ("телек".into(), "ru.cn.atx".into(), "open".into()),
+            ("киношка".into(), "tv.okko.androidtv".into(), "search".into()),
+        ]);
+        let t = |s: &str| match intent(s, false) {
+            Some(Intent::Tv(a)) => Some(a),
+            _ => None,
+        };
+        // A whole phrase opens the exact package, no guessing by the name.
+        assert_eq!(t("Алиса, открой лнд"), Some(TvAction::OpenPackage("com.lazycatsoftware.lmd".into())));
+        assert_eq!(t("включи фри ти ви"), Some(TvAction::OpenPackage("ru.cn.atx".into())));
+        assert_eq!(t("включи телек на телевизоре"), Some(TvAction::OpenPackage("ru.cn.atx".into())));
+        // The search uses the exact package too, and drops the film noun.
+        assert_eq!(t("найди фильм колобок на лэнд"),
+            Some(TvAction::Search("колобок".into(), Some("com.lazycatsoftware.lmd".into()))));
+        assert_eq!(t("найди сериал друзья на киношка"),
+            Some(TvAction::Search("друзья".into(), Some("tv.okko.androidtv".into()))));
+        // «open» does not search, «search» does not open.
+        assert!(t("найди фильм колобок на фри ти ви").is_none());
+        assert!(t("открой киношка").is_none());
+        // A strict whole-phrase match: music and tails stay Alice's / the old parser's.
+        assert_eq!(t("включи bonobo"), None);
+        assert_eq!(t("включи лнд и радио"), None);
+        // Built-in phrases still work, and Google search without an app is intact.
+        assert_eq!(t("найди фильм колобок на телевизоре"), Some(TvAction::Search("колобок".into(), None)));
+        crate::tv::set_app_phrases(Vec::new());
     }
 
     #[test]
