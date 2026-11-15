@@ -1414,7 +1414,9 @@ pub fn voice(text: &str) -> Option<Voice> {
     if has(&["дедлайн", "какие сроки", "какие у меня сроки", "что горит", "что просрочено", "что я просрочил", "что я просрочила"]) {
         return Some(Voice::Ask(Ask::Deadlines));
     }
-    if has(&["на неделю", "на этой неделе", "на эту неделю", "что на неделе"]) && has(&["план", "задач", "что", "расписан"]) {
+    if has(&["на неделю", "на этой неделе", "на эту неделю", "что на неделе"])
+        && has(&["план", "задач", "задани", "задачи", "что", "расписан"])
+    {
         return Some(Voice::Ask(Ask::Week));
     }
     if has(&["расскажи про мой день", "расскажи о моем дне", "сводка на день", "сводку на день", "утренняя сводка", "утреннюю сводку", "как выглядит мой день", "обзор дня"]) {
@@ -1422,6 +1424,16 @@ pub fn voice(text: &str) -> Option<Voice> {
     }
     if has(&["расписание", "что у меня в календаре", "что в календаре", "какие встречи", "какие у меня встречи", "какие события"]) {
         return Some(Voice::Ask(Ask::Schedule(day)));
+    }
+    // «посмотрю задания на неделю», «подскажи задания», «покажи планы»: these
+    // verbs used to leave the phrase to Alice (the owner's wording).
+    if has(&["посмотрю", "посмотри", "посмотреть", "покажи", "подскажи"]) {
+        if has(&["задани", "задачи", "задач"]) {
+            return Some(Voice::Ask(Ask::Todo(day)));
+        }
+        if has(&["план"]) {
+            return Some(Voice::Ask(Ask::Plans(day)));
+        }
     }
     if has(&["нужно сделать", "надо сделать", "должен сделать", "должна сделать", "список дел", "какие задачи", "какие у меня задачи", "мои задачи", "что сделать"]) {
         return Some(Voice::Ask(Ask::Todo(day)));
@@ -2310,7 +2322,15 @@ mod tests {
         assert_eq!(voice("какая следующая встреча"), Some(Voice::Ask(Ask::Next)));
         assert_eq!(voice("какие у меня дедлайны"), Some(Voice::Ask(Ask::Deadlines)));
         assert_eq!(voice("какие планы на неделю"), Some(Voice::Ask(Ask::Week)));
+        // The owner's wording: «посмотрю задания», «подскажи задания».
+        assert_eq!(voice("посмотрю задания на неделю"), Some(Voice::Ask(Ask::Week)));
+        assert_eq!(voice("посмотри задания"), Some(Voice::Ask(Ask::Todo(0))));
+        assert_eq!(voice("подскажи задания"), Some(Voice::Ask(Ask::Todo(0))));
+        assert_eq!(voice("посмотрю задания на сегодня"), Some(Voice::Ask(Ask::Todo(0))));
+        assert_eq!(voice("покажи планы"), Some(Voice::Ask(Ask::Plans(0))));
+        assert_eq!(voice("посмотрю планы на неделю"), Some(Voice::Ask(Ask::Week)));
         assert_eq!(voice("расскажи про мой день"), Some(Voice::Ask(Ask::Brief)));
+        assert_eq!(voice("какая сегодня погода"), None);
         assert_eq!(voice("добавь в календарь встречу с петей завтра в 15"), Some(Voice::AddEvent("встречу с петей завтра в 15".into())));
         assert_eq!(voice("добавь встречу с петей завтра в 15"), Some(Voice::AddEvent("встреча с петей завтра в 15".into())));
         assert_eq!(voice("запланируй стоматолог в пятницу в 10"), Some(Voice::AddEvent("стоматолог в пятницу в 10".into())));
