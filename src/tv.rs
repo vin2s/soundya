@@ -422,10 +422,12 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
         }
         TvAction::Wake => {
             wake(&sh);
+            adb::forget_kept_pub(host);
             Ok("Включаю".into())
         }
         TvAction::Sleep => {
             wake(&sh);
+            adb::forget_kept_pub(host);
             Ok("Выключаю".into())
         }
         TvAction::Key(code, n) => {
