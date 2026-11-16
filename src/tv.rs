@@ -420,8 +420,14 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             let name = out.split_whitespace().collect::<Vec<_>>().join(" ");
             Ok(format!("Телевизор на связи: {}", if name.is_empty() { "Android" } else { &name }))
         }
-        TvAction::Wake => sh("input keyevent KEYCODE_WAKEUP").map(|_| "Включаю".into()),
-        TvAction::Sleep => sh("input keyevent KEYCODE_SLEEP").map(|_| "Выключаю".into()),
+        TvAction::Wake => {
+            wake(&sh);
+            Ok("Включаю".into())
+        }
+        TvAction::Sleep => {
+            wake(&sh);
+            Ok("Выключаю".into())
+        }
         TvAction::Key(code, n) => {
             let keys = vec![*code; usize::from(*n)].join(" ");
             sh(&format!("input keyevent {keys}")).map(|_| "Готово".into())

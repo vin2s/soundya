@@ -660,6 +660,15 @@ pub fn forget_kept() {
     *KEPT.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Forgets a kept connection for `host`. Called after a TV wake/sleep command so that
+/// the next command opens a fresh connection instead of reusing a dead one.
+pub fn forget_kept_pub(host: &str) {
+    let mut g = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(&*g, Some((h, _, _, _)) if h == host) {
+        *g = None;
+    }
+}
+
 /// (Used by the installer, installer/: the speaker itself never pushes.)
 #[allow(dead_code)]
 /// Writes `data` to `path` on the device (mode 0644), like `adb push`: the
