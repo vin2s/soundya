@@ -400,12 +400,10 @@ fn key(dir: &Path) -> Result<std::sync::Arc<adb::Key>, String> {
 }
 
 /// Wakes the TV and dismisses its screensaver; a sleeping TV needs a moment.
-fn wake(sh: &dyn Fn(&str) -> Result<String, String>) {
-    let asleep = sh("dumpsys power | grep -m1 mWakefulness=").map(|o| !o.contains("Awake")).unwrap_or(false);
-    let _ = sh("input keyevent KEYCODE_WAKEUP");
-    if asleep {
-        std::thread::sleep(Duration::from_millis(1500));
-    }
+pub fn wake(sh: &dyn Fn(&str) -> Result<String, String>) -> Result<(), String> {
+    let _ = sh("dumpsys power | grep -m1 mWakefulness=").map(|o| !o.contains("Awake")).unwrap_or(false);
+    sh("input keyevent KEYCODE_WAKEUP")?;
+    Ok(())
 }
 
 pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> {
@@ -421,12 +419,12 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             Ok(format!("Телевизор на связи: {}", if name.is_empty() { "Android" } else { &name }))
         }
         TvAction::Wake => {
-            wake(&sh);
+            let _ = wake(&sh);
             adb::forget_kept_pub(host);
             Ok("Включаю".into())
         }
         TvAction::Sleep => {
-            wake(&sh);
+            let _ = wake(&sh);
             adb::forget_kept_pub(host);
             Ok("Выключаю".into())
         }
