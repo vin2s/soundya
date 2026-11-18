@@ -34,6 +34,8 @@ const APPS: &[(&str, &[&str], &[&str])] = &[
     ("Lampa", &["лампа", "lampa"], &["lampa"]),
     ("KinoPub", &["кинопаб", "kinopub"], &["kinopub"]),
     ("HD VideoBox", &["видеобокс", "hd videobox"], &["videobox"]),
+    ("LazyMedia Deluxe", &["лмд", "лэнд", "делюкс", "lmd", "лм делюкс", "lm deluxe"], &["lazycatsoftware.lmd"]),
+    ("Free TV", &["фри ти ви", "фритиви", "free tv", "free-tv", "atx", "атикс"], &["ru.cn.atx"]),
     ("SmartTube", &["смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "смарт тьюбе", "smarttube", "smart tube"], &["liskovsoft.smarttubetv", "smarttube"]),
     ("VPN", &["впн", "vpn", "випиэн"], &["vpn", "wireguard", "amnezia", "outline", "hiddify", "v2ray", "nekobox", "openvpn"]),
 ];
@@ -41,6 +43,13 @@ const APPS: &[(&str, &[&str], &[&str])] = &[
 /// Video apps a search can go into («найди … на рутубе»); not music (Alice's), settings, VPN.
 const VIDEO_APPS: &[&str] = &["Кинопоиск", "ivi", "Okko", "Wink", "KION", "Netflix", "Twitch", "VK Видео", "RUTUBE", "PREMIER",
     "Амедиатека", "Смотрёшка", "Plex", "Kodi", "Lampa", "KinoPub", "HD VideoBox", "SmartTube"];
+
+/// Apps that search in a screen of their own: (package, the activity to open).
+/// The query is the «query» extra of that screen.
+const OWN_SEARCH: &[(&str, &str)] = &[(
+    "com.lazycatsoftware.lmd",
+    "com.lazycatsoftware.lazymediadeluxe.ui.tv.activities.ActivityTvSearch",
+)];
 
 /// The shown name of the video app `said` starts with («рутубе» → RUTUBE).
 fn video_app(said: &str) -> Option<&'static str> {
@@ -124,6 +133,61 @@ pub fn screen_app(said: &str) -> bool {
 /// Apps only the TV has: said without «на проекторе», the phrase is still the TV's.
 pub fn tv_only_app(said: &str) -> bool {
     ["смарт тьюб", "смарттьюб", "смарт туб", "смарт тюб", "smarttube", "smart tube"].iter().any(|n| said.contains(n))
+}
+
+/// «Свои фразы для приложений»: the user's own names for the TV apps:
+/// (name as said, the exact package, "open" / "search" / "both").
+static APP_PHRASES: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The names from the settings; the voice parser reads them.
+pub fn set_app_phrases(list: Vec<(String, String, String)>) {
+    *APP_PHRASES.lock().unwrap() = list;
+}
+
+/// The user's app names: (name, package, mode).
+pub fn app_phrases() -> Vec<(String, String, String)> {
+    APP_PHRASES.lock().unwrap().clone()
+}
+
+/// A loose key for a name: Alice may write «эфм плеер» as «fm player», «лмд» as
+/// «lmd». Cyrillic is transliterated, then the vowels are dropped, so both
+/// spellings meet. For the user's own names only: the whole phrase must still
+/// match, so music is not taken.
+pub fn app_name_key(said: &str) -> String {
+    let words: String = said.to_lowercase().replace('ё', "е").split_whitespace().collect::<Vec<_>>().join("");
+    translit(&words).chars().filter(|c| !"aeiouy".contains(*c)).collect()
+}
+
+/// The app the user named `said`: (its exact package, the mode). The whole
+/// phrase must match one of the names.
+pub fn app_phrase_match(said: &str) -> Option<(String, String)> {
+    app_phrase_match_in(&app_phrases(), said)
+}
+
+/// The same, for a given list of names (the tests need their own).
+pub fn app_phrase_match_in(list: &[(String, String, String)], said: &str) -> Option<(String, String)> {
+    let said = crate::alice::normalize_phrase(said);
+    if said.is_empty() {
+        return None;
+    }
+    let key = app_name_key(&said);
+    list.iter()
+        .find(|(alias, _, _)| *alias == said || (!key.is_empty() && app_name_key(alias) == key))
+        .map(|(_, pkg, mode)| (pkg.clone(), mode.clone()))
+}
+
+/// «найди фильм колобок на делюкс» → («найди фильм колобок», «делюкс»): the app
+/// named at the end of the phrase.
+pub fn split_app_suffix(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    let at = t.rfind(" на ")?;
+    let (head, tail) = t.split_at(at);
+    let app = tail.trim_start().strip_prefix("на ")?.trim();
+    if app.is_empty() || app.split_whitespace().count() > 3 {
+        return None;
+    }
+    let head = head.trim();
+    (!head.is_empty()).then(|| (head.to_owned(), app.to_owned()))
 }
 
 // ---------------------------------------------------------------- the screen
@@ -250,6 +314,7 @@ fn tap(sh: &dyn Fn(&str) -> Result<String, String>, n: &UiNode) -> Result<(), St
 }
 
 fn open_app(sh: &dyn Fn(&str) -> Result<String, String>, name: &str) -> Result<String, String> {
+    wake_if_asleep(sh);
     let list = sh("pm list packages")?;
     let packages: Vec<String> = list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
     let Some(pkg) = find_package(name, &packages) else {
@@ -461,6 +526,14 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
                 None => Err(format!("Не нашла на телевизоре приложение {app}")),
             }
         }
+        TvAction::SearchInPkg(pkg, q) => {
+            wake_if_asleep(&sh);
+            if search_in_app(&sh, &pkg, q) {
+                Ok(format!("Ищу {q} в {}", label(&pkg)))
+            } else {
+                sh(&global_search(q)).map(|_| format!("Ищу {q}"))
+            }
+        }
         TvAction::YouTube(q) => {
             let url = format!("https://www.youtube.com/results?search_query={}", percent_encode(q));
             let out = sh(&format!("am start -a android.intent.action.VIEW -d {}", adb::quote(&url)))?;
@@ -471,12 +544,19 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             Ok(format!("Ищу на ютубе {q}"))
         }
         TvAction::Apps => {
-            // Apps with a TV launcher entry (what the TV's home screen shows);
-            // older TVs without `query-activities`: third-party packages.
-            let out = sh("cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LEANBACK_LAUNCHER 2>/dev/null")?;
-            let mut apps = packages_of(&out);
+            // Apps with a TV launcher entry (what the TV's home screen shows).
+            // `query-activities` stalls on some TVs (the read comes back as EAGAIN,
+            // «os error 11»): then the plain package list, which is enough to pick an app.
+            let queried = sh("cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LEANBACK_LAUNCHER 2>/dev/null");
+            let mut apps = queried.as_ref().map(|out| packages_of(out)).unwrap_or_default();
             if apps.is_empty() {
-                let list = sh("pm list packages -3")?;
+                if let Err(e) = &queried {
+                    eprintln!("tv: launcher list skipped: {e}");
+                }
+                let list = match sh("pm list packages -3") {
+                    Ok(list) => list,
+                    Err(e) => return Err(e),
+                };
                 apps = list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
             }
             apps.sort();
@@ -488,6 +568,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             if !valid_package(pkg) {
                 return Err("неверное имя пакета".into());
             }
+            wake_if_asleep(&sh);
             let out = sh(&launch_script(pkg))?;
             if out.contains("Error") || out.contains("No activities") || out.contains("Exception") {
                 return Err(format!("Телевизор не открыл {pkg}"));
@@ -564,6 +645,7 @@ pub fn run(host: &str, dir: &Path, action: &TvAction) -> Result<String, String> 
             sh("input keyevent KEYCODE_DPAD_CENTER").map(|_| format!("Открыла {app} и нажала главную кнопку"))
         }
         TvAction::Open(name) => {
+            wake_if_asleep(&sh);
             let list = sh("pm list packages")?;
             let packages: Vec<String> =
                 list.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(str::to_owned).collect();
@@ -607,10 +689,13 @@ fn global_search(q: &str) -> String {
     format!("am start -a android.search.action.GLOBAL_SEARCH --es query {}", adb::quote(q))
 }
 
-/// Asleep TVs are woken first, and given a moment.
+/// Asleep TVs are woken first, and given a moment. A screen that is already on is
+/// left alone: on some boxes KEYCODE_WAKEUP then starts the screensaver.
 fn wake_if_asleep(sh: &dyn Fn(&str) -> Result<String, String>) {
-    let asleep = sh("dumpsys power | grep -m1 mWakefulness=").map(|o| !o.contains("Awake")).unwrap_or(false);
-    if asleep {
+    let power = sh("dumpsys power | grep -E 'mWakefulness=|Display Power'").unwrap_or_default();
+    let awake = power.lines().any(|l| l.contains("mWakefulness=") && l.contains("Awake"));
+    let screen_off = power.contains("state=OFF");
+    if !power.is_empty() && (!awake || screen_off) {
         let _ = sh("input keyevent KEYCODE_WAKEUP");
         std::thread::sleep(Duration::from_millis(1500));
     }
@@ -619,6 +704,17 @@ fn wake_if_asleep(sh: &dyn Fn(&str) -> Result<String, String>) {
 /// The search inside `pkg`: Android's search screen, else the app's own search page as a link
 /// (RUTUBE has no search screen: «найди маму в 16» opened the TV's general search). false: neither.
 fn search_in_app(sh: &dyn Fn(&str) -> Result<String, String>, pkg: &str, q: &str) -> bool {
+    // Some apps search in their own screen (LazyMedia Deluxe): the standard SEARCH
+    // intent goes to a different one that only opens an article. Start theirs with
+    // the query — and from a fresh start, or the running one keeps the old query.
+    if let Some((_, activity)) = OWN_SEARCH.iter().find(|(p, _)| *p == pkg) {
+        let cmd = format!("am force-stop {pkg}; sleep 1; am start -n {pkg}/{activity} --es query {}", adb::quote(q));
+        match sh(&cmd) {
+            Ok(out) if !out.contains("Error") && !out.contains("Warning") => return true,
+            Ok(out) => eprintln!("tv: {pkg} has no search screen ({})", out.trim().replace('\n', " | ")),
+            Err(e) => eprintln!("tv: {pkg} search: {e}"),
+        }
+    }
     if let Some(cmd) = search_script(pkg, q) {
         match sh(&cmd) {
             Ok(out) if !out.contains("Error") => return true,
@@ -652,7 +748,9 @@ fn launch_script(pkg: &str) -> String {
     };
     format!(
         "c=$({}); case \"$c\" in */*) ;; *) c=$({});; esac; \
-         case \"$c\" in */*) am start -n \"$c\" 2>&1 ;; *) monkey -p {pkg} 1 2>&1 ;; esac",
+         case \"$c\" in */*) am start -n \"$c\" 2>&1 ;; *) monkey -p {pkg} 1 2>&1 ;; esac; \
+         f=$(dumpsys window 2>/dev/null | grep mCurrentFocus); \
+         case \"$f\" in *:dream*) service call dreams 3 >/dev/null 2>&1 ;; esac",
         resolve("LEANBACK_LAUNCHER"),
         resolve("LAUNCHER")
     )
@@ -707,6 +805,8 @@ mod tests {
         // Unknown: the telling part of the name, the package after it.
         assert_eq!(label("com.teamsmart.videomanager.tv"), "Videomanager (com.teamsmart.videomanager.tv)");
         assert_eq!(label("org.example.app"), "Example (org.example.app)");
+        assert_eq!(label("com.lazycatsoftware.lmd"), "LazyMedia Deluxe");
+        assert_eq!(label("ru.cn.atx"), "Free TV");
     }
 
     #[test]
@@ -731,6 +831,11 @@ mod tests {
         assert_eq!(find_package("настройки", &pk).as_deref(), Some("com.android.tv.settings"));
         assert_eq!(find_package("окко", &pk).as_deref(), Some("tv.okko.androidtv"));
         assert_eq!(find_package("твич", &pk), None);
+        // The apps of this TV: their own names.
+        let pk2: Vec<String> = ["com.lazycatsoftware.lmd", "ru.cn.atx"].iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(find_package("делюкс", &pk2).as_deref(), Some("com.lazycatsoftware.lmd"));
+        assert_eq!(find_package("лмд", &pk2).as_deref(), Some("com.lazycatsoftware.lmd"));
+        assert_eq!(find_package("фри ти ви", &pk2).as_deref(), Some("ru.cn.atx"));
         // Xiaomi L1 Pro lists YouTube Music before YouTube.
         let pk: Vec<String> =
             ["com.google.android.youtube.tvmusic", "com.google.android.youtube.tv"].iter().map(|s| (*s).to_owned()).collect();
@@ -739,6 +844,32 @@ mod tests {
         assert_eq!(find_package("ютуб музыку", &pk).as_deref(), Some("com.google.android.youtube.tvmusic"));
         let only_music: Vec<String> = vec!["com.google.android.youtube.tvmusic".into()];
         assert_eq!(find_package("ютуб", &only_music), None);
+    }
+
+    #[test]
+    fn own_app_phrases_are_matched_by_the_whole_name() {
+        let list = vec![
+            ("лнд".into(), "com.lazycatsoftware.lmd".into(), "both".into()),
+            ("фри ти ви".into(), "ru.cn.atx".into(), "open".into()),
+            ("эфм плеер".into(), "ru.fmplay".into(), "open".into()),
+        ];
+        assert_eq!(app_phrase_match_in(&list, "лнд").map(|(p, m)| (p, m)),
+                   Some(("com.lazycatsoftware.lmd".into(), "both".into())));
+        // Alice may write the name another way: «эфм плеер» as «fm player».
+        assert_eq!(app_phrase_match_in(&list, "fm player").map(|(p, _)| p), Some("ru.fmplay".into()));
+        assert_eq!(app_phrase_match_in(&list, "фри ти ви").map(|(p, m)| (p, m)),
+                   Some(("ru.cn.atx".into(), "open".into())));
+        assert_eq!(app_phrase_match_in(&list, "делюкс"), None, "a name that was not saved is not taken");
+        assert_eq!(app_phrase_match_in(&list, "неизвестное"), None);
+    }
+
+    #[test]
+    fn the_app_named_at_the_end_of_the_phrase() {
+        assert_eq!(split_app_suffix("найди фильм колобок на делюкс"),
+                   Some(("найди фильм колобок".into(), "делюкс".into())));
+        assert_eq!(split_app_suffix("найди фильм колобок на делюкс на телевизоре"),
+                   Some(("найди фильм колобок на делюкс".into(), "телевизоре".into())));
+        assert_eq!(split_app_suffix("найди фильм колобок"), None);
     }
 
     #[test]

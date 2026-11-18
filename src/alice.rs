@@ -208,6 +208,9 @@ pub enum TvAction {
     Search(String),
     /// «Найди маму в 16 на рутубе»: search inside that app (spoken app name, query).
     SearchIn(String, String),
+    /// «Найди фильм колобок на делюкс»: search inside the app the user named
+    /// (its exact package, the query).
+    SearchInPkg(String, String),
     /// Search YouTube: «включи на ютубе котиков на проекторе».
     YouTube(String),
     /// Remote-control keys: the Android key code and how many presses.
@@ -1276,6 +1279,123 @@ pub fn macro_matches(heard: &str, saved: &str) -> bool {
     RUN.iter().any(|p| h.strip_prefix(p).is_some_and(|rest| rest == s))
 }
 
+/// The scenario this phrase runs: the whole phrase, or — for a phrase bound to one
+/// TV app — the app's name said the way «включи кинопоиск» is.
+pub fn matching_macro<'a>(heard: &str, macros: &'a [(String, String)]) -> Option<&'a (String, String)> {
+    let heard = normalize_phrase(heard);
+    macros.iter().find(|(phrase, script)| macro_matches(&heard, phrase) || app_macro_matches(&heard, phrase, script))
+}
+
+/// «tv openpkg …» / «tv@Имя openpkg …» and nothing else: a phrase that only opens an app.
+fn openpkg_script(script: &str) -> bool {
+    let lines: Vec<&str> = script.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let [line] = lines[..] else {
+        return false;
+    };
+    let mut parts = line.split_whitespace();
+    let (Some(head), Some(op), Some(pkg), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    (head == "tv" || head.starts_with("tv@"))
+        && op == "openpkg"
+        && pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+/// A phrase saved for an app, heard the way a known app is: «открой» and «запусти»
+/// are the same as «включи», and the name may be written as Alice wrote it
+/// («фри тв», «free tv», «fltv», «freaky vee»). Anything that is not one app stays
+/// an exact phrase.
+fn app_macro_matches(heard: &str, saved: &str, script: &str) -> bool {
+    if !openpkg_script(script) {
+        return false;
+    }
+    let Some(heard_name) = app_name(heard) else {
+        return false;
+    };
+    let saved_name = app_name(saved).unwrap_or(saved);
+    if saved_name.is_empty() || heard_name == saved_name {
+        return heard_name == saved_name && !saved_name.is_empty();
+    }
+    // «кинопоиск hd»: the saved name and a couple of words after it.
+    if heard_name.starts_with(saved_name)
+        && heard_name.len() <= saved_name.len() + 6
+        && heard_name.as_bytes().get(saved_name.len()).is_none_or(|b| *b == b' ')
+    {
+        return true;
+    }
+    let (h, s) = (sound_key(heard_name), sound_key(saved_name));
+    h == s || key_edit_one(&h, &s)
+}
+
+const APP_VERBS: [&str; 5] = ["включи ", "открой ", "запусти ", "открыть ", "вруби "];
+
+/// The app name after a launch verb. None when the phrase is not «verb + name».
+fn app_name(phrase: &str) -> Option<&str> {
+    let name = APP_VERBS.iter().find_map(|v| phrase.strip_prefix(v))?.trim();
+    (!name.is_empty() && !name.contains(" на ") && !name.contains(" в ")).then_some(name)
+}
+
+/// Consonants of the name, Russian written in Latin, «l» as «r»: «фри тв» and «fltv»
+/// are both «frtv».
+fn sound_key(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev = '\0';
+    for c in name.chars() {
+        let t = match c {
+            'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d", 'е' | 'ё' | 'э' => "e", 'ж' => "zh",
+            'з' => "z", 'и' | 'й' | 'ы' => "i", 'к' => "k", 'л' => "r", 'м' => "m", 'н' => "n", 'о' => "o",
+            'п' => "p", 'р' => "r", 'с' => "s", 'т' => "t", 'у' => "u", 'ф' => "f", 'х' => "h", 'ц' => "c",
+            'ч' => "ch", 'ш' => "sh", 'щ' => "sch", 'ю' => "yu", 'я' => "ya",
+            c if c.is_ascii_alphabetic() => {
+                let c = if c.eq_ignore_ascii_case(&'l') { 'r' } else { c.to_ascii_lowercase() };
+                if !"aeiouy".contains(c) && c != prev {
+                    out.push(c);
+                    prev = c;
+                }
+                continue;
+            }
+            _ => "",
+        };
+        for c in t.chars() {
+            if !"aeiouy".contains(c) && c != prev {
+                out.push(c);
+                prev = c;
+            }
+        }
+    }
+    out
+}
+
+/// One inserted, deleted or replaced consonant. Both keys are at least four
+/// consonants and start with the same one, so «кинопоиск» does not take «фри тв».
+fn key_edit_one(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len() < 4 || b.len() < 4 || a.len().abs_diff(b.len()) > 1 || a.first() != b.first() {
+        return false;
+    }
+    let (mut i, mut j, mut used) = (0, 0, false);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            i += 1;
+            j += 1;
+        } else if used {
+            return false;
+        } else {
+            used = true;
+            if a.len() == b.len() {
+                i += 1;
+                j += 1;
+            } else if a.len() > b.len() {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    }
+    let left = (a.len() - i) + (b.len() - j);
+    left == 0 || (left == 1 && !used)
+}
+
 /// Removes "в саундклауде", "на soundcloud" and similar; returns whether it was present.
 pub fn strip_service(text: &str) -> (String, bool) {
     const NAMES: [&str; 8] = [
@@ -1691,7 +1811,68 @@ fn same_word(said: &str, name: &str) -> bool {
 /// The phrase with a device's name in it, made into one the TV / PC parsers know:
 /// «выключи телевизор в спальне» → «выключи телевизор», «включи ютуб в спальне» →
 /// «включи ютуб на телевизоре», «усыпи ноутбук» → «усыпи компьютер». (name, is TV, phrase)
+/// «Свои фразы для приложений»: the whole phrase names one of the user's own
+/// TV apps («открыть делюкс»), or asks to search a film in it («найди фильм
+/// колобок на делюкс»). Their exact package skips all guessing.
+fn app_phrase_intent(text: &str) -> Option<TvAction> {
+    let n = normalize(text);
+    // «… на телевизоре» is how the panel sends a phrase; the same app can be
+    // asked without it. Strip only the trailing TV mention — `strip_tv` would
+    // eat an alias that happens to be «телек» in the middle of the phrase.
+    const TV_TAILS: [&str; 7] = [
+        " на телевизоре", " на проекторе", " на приставке", " на тв", " в телевизоре", " в проекторе", " на телике",
+    ];
+    let mut untv = n.clone();
+    for tail in TV_TAILS {
+        if let Some(head) = untv.strip_suffix(tail) {
+            untv = head.to_owned();
+            break;
+        }
+    }
+    if let Some(action) = app_phrase_in(&untv) {
+        return Some(action);
+    }
+    app_phrase_in(&n)
+}
+
+fn app_phrase_in(n: &str) -> Option<TvAction> {
+    let full = normalize_phrase(n);
+    let apps = crate::tv::app_phrases();
+    if apps.is_empty() || full.is_empty() {
+        return None;
+    }
+    // «открой делюкс», «запусти делюкс», «включи делюкс» — the app itself, not a film.
+    let verbs = ["открой", "запусти", "открыть", "запустить", "включи", "поставь", "перейди", "зайди"];
+    for verb in verbs {
+        if let Some(rest) = full.strip_prefix(&format!("{verb} ")) {
+            if let Some((pkg, mode)) = crate::tv::app_phrase_match(rest) {
+                return (mode != "search").then_some(TvAction::OpenPackage(pkg));
+            }
+        }
+    }
+    // «найди фильм колобок на делюкс» — the query before «на <алиасе>».
+    let (query, app) = crate::tv::split_app_suffix(&full)?;
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if !matches!(words.first().copied().unwrap_or(""), "найди" | "поищи" | "покажи" | "включи" | "поставь") {
+        return None;
+    }
+    let (pkg, mode) = crate::tv::app_phrase_match(&app)?;
+    if mode == "open" {
+        return None;
+    }
+    let mut q = words[1..].join(" ");
+    for noun in ["фильм ", "сериал ", "мультфильм ", "мультик ", "кино ", "фильмы ", "сериалы "] {
+        if let Some(r) = q.strip_prefix(noun) {
+            q = r.to_owned();
+            break;
+        }
+    }
+    let q = q.trim();
+    (!q.is_empty()).then_some(TvAction::SearchInPkg(pkg, q.to_owned()))
+}
+
 fn device_in(n: &str, devices: &[(String, bool)]) -> Option<(String, bool, String)> {
+
     let words: Vec<&str> = n.split_whitespace().collect();
     // Longer names first: «большая спальня» before «спальня».
     let mut sorted: Vec<&(String, bool)> = devices.iter().collect();
@@ -1960,6 +2141,11 @@ fn intent_plain(text: &str, keyword_only: bool) -> Option<Intent> {
     }
     // The TV first: «перемотай вперёд на проекторе», «открой ютуб на проекторе».
     let n = normalize(text);
+    // «Свои фразы для приложений»: «найди фильм колобок на делюкс» — the app the
+    // user named with their own words, and what to do with it.
+    if let Some(action) = app_phrase_intent(text) {
+        return Some(Intent::Tv(action));
+    }
     let named = tv(&n);
     // «Поставь видео на паузу на проекторе» is its pause, not an app called «видео на паузу»:
     // `tv()` takes «включи / поставь / открой X» as «open X» when nothing else fits.
@@ -2739,8 +2925,7 @@ fn read_frames(
             // A user macro whose phrase is heard wins over built-in handling —
             // the whole phrase, not a part of it (a macro «свет» must not take
             // «включи свет на кухне» from Alice).
-            let normalized = normalize_phrase(&text);
-            if let Some((phrase, _)) = shared.macros().into_iter().find(|(p, _)| macro_matches(&normalized, p)) {
+            if let Some((phrase, _)) = matching_macro(&text, &shared.macros()) {
                 eprintln!("voice: {text:?} -> macro {phrase:?}");
                 take();
                 clear_question();
@@ -3246,6 +3431,15 @@ mod tests {
         assert!(macro_matches(&normalize_phrase("Алиса, каточку в Deadlock"), &normalize_phrase("каточку в дедлок")));
         assert!(macro_matches(&normalize_phrase("запусти рабочий режим"), &normalize_phrase("запусти рабочий режим")));
         assert!(!macro_matches(&normalize_phrase("буду смотреть ютуб завтра"), &normalize_phrase("буду смотреть ютуб")), "still the whole phrase");
+        let free = "tv@Спальня openpkg ru.cn.atx";
+        let saved = normalize_phrase("включи фри тв");
+        for heard in ["Включи freaky vee", "включи fltv", "Алиса, включи free tv", "запусти фри тв", "открой фри ти ви"] {
+            assert!(matching_macro(heard, &[(saved.clone(), free.into())]).is_some(), "{heard}");
+        }
+        assert!(matching_macro("включи кинопоиск", &[(saved.clone(), free.into())]).is_none());
+        assert!(matching_macro("включи фри тв на кухне", &[(saved.clone(), free.into())]).is_none());
+        assert!(matching_macro("freaky vee", &[(saved, free.into())]).is_none(), "an app name still needs the verb");
+        assert!(matching_macro("включи freaky vee", &[("включи фри тв".into(), "light on".into())]).is_none(), "only an app phrase is loose");
         // Inside apps, like the remote.
         assert_eq!(t("Алиса, наведись выше на проекторе"), Some(TvAction::Key(UP, 1)));
         assert_eq!(t("ниже на три на проекторе"), Some(TvAction::Key(DOWN, 3)));
@@ -3273,6 +3467,31 @@ mod tests {
         // Without the TV named: not a TV command.
         assert_eq!(t("включи bonobo"), None);
         assert_eq!(t("открой ютуб"), None);
+    }
+
+    #[test]
+    fn the_owners_own_app_phrases() {
+        // The apps the user named in the panel.
+        crate::tv::set_app_phrases(vec![
+            ("лнд".into(), "com.lazycatsoftware.lmd".into(), "both".into()),
+            ("лэнд".into(), "com.lazycatsoftware.lmd".into(), "both".into()),
+            ("делюкс".into(), "com.lazycatsoftware.lmd".into(), "both".into()),
+            ("фри ти ви".into(), "ru.cn.atx".into(), "open".into()),
+        ]);
+        let t = |s: &str| intent(s, false);
+        // «Алиса, найди фильм Колобок на делюкс»: the app and the query.
+        assert_eq!(t("найди фильм колобок на делюкс"),
+                   Some(Intent::Tv(TvAction::SearchInPkg("com.lazycatsoftware.lmd".into(), "колобок".into()))));
+        assert_eq!(t("Алиса, найди фильм колобок на лнд на телевизоре"),
+                   Some(Intent::Tv(TvAction::SearchInPkg("com.lazycatsoftware.lmd".into(), "колобок".into()))),
+                   "with the TV named too");
+        // «включи делюкс»: the app itself.
+        assert_eq!(t("включи делюкс"), Some(Intent::Tv(TvAction::OpenPackage("com.lazycatsoftware.lmd".into()))));
+        // A «только запускать» app is not searched in.
+        assert_eq!(t("найди фильм колобок на фри ти ви"), None);
+        // A name that was not saved is not taken.
+        assert_eq!(t("найди фильм колобок на кинопоиск"), None);
+        crate::tv::set_app_phrases(Vec::new());
     }
 
     #[test]

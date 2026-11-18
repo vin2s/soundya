@@ -32,7 +32,7 @@ cp installer/target/universal2-apple-darwin/release/soundya-installer "$APP/Cont
 chmod 755 "$APP/Contents/MacOS/soundya"
 python3 scripts/mac-dmg/make_assets.py target/dmg-assets >/dev/null
 cp target/dmg-assets/soundya.icns "$APP/Contents/Resources/soundya.icns"
-VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 | tr -d '\r')
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

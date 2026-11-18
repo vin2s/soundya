@@ -48,9 +48,19 @@ mkdir -p dist/soundya/fake && cp packaging/fake/*.bin dist/soundya/fake/
 # zapret2 nfqws2 v1.0.6, linux-arm static, and its Lua library, from the official release.
 cp packaging/nfqws2 dist/soundya/
 mkdir -p dist/soundya/lua && cp packaging/lua/*.lua dist/soundya/lua/
+# The scripts and the init file must have Unix line endings: a CRLF shebang
+# («#!/bin/sh\r») does not run on the speaker, and the install never starts.
+# A checkout on Windows has CRLF everywhere, so the endings are fixed here.
+for f in install.sh uninstall.sh run.sh guard.sh S99soundya soundya.env; do
+    tr -d '\r' < "dist/soundya/$f" > "dist/soundya/$f.new" && mv "dist/soundya/$f.new" "dist/soundya/$f"
+done
+for f in dist/soundya/lua/*.lua; do
+    tr -d '\r' < "$f" > "$f.new" && mv "$f.new" "$f"
+done
 chmod 755 dist/soundya/soundya dist/soundya/shairport-sync dist/soundya/nfqws dist/soundya/nfqws2 dist/soundya/install.sh dist/soundya/uninstall.sh dist/soundya/run.sh dist/soundya/guard.sh dist/soundya/S99soundya
 # Version and checksums: install.sh refuses a damaged package and checks the update started.
-sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 > dist/soundya/VERSION
+# The version without a stray CR: the file is compared with the running program.
+sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 | tr -d '\r' > dist/soundya/VERSION
 (cd dist/soundya && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort \
     | while read -r f; do if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi; done > SHA256SUMS)
 COPYFILE_DISABLE=1 tar -C dist -cf dist/soundya-armv7.tar soundya

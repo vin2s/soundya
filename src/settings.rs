@@ -171,6 +171,10 @@ pub struct Settings {
     /// searches in (package); a TV not here: its own search.
     #[serde(default)]
     pub tv_search: std::collections::BTreeMap<String, String>,
+    /// «Свои фразы для приложений»: how the user names a TV app, the exact
+    /// package picked from the TV, and what to do with it (open / search / both).
+    #[serde(default)]
+    pub tv_app_phrases: Vec<AppPhrase>,
     /// Music service for requests that name none: "soundcloud" (as before
     /// 0.5.00) or "yandex" (Yandex Music; SoundCloud only when it is named).
     #[serde(default = "music_default")]
@@ -529,6 +533,20 @@ pub struct Macro {
     pub script: String,
 }
 
+/// «Свои фразы для приложений»: how the user names a TV app and what to do with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppPhrase {
+    /// Names as said, comma-separated: «лнд, лэнд, делюкс».
+    #[serde(default)]
+    pub phrase: String,
+    /// Exact package name from `tv apps` (never guessed from the spoken name).
+    #[serde(default)]
+    pub pkg: String,
+    /// "open", "search" or "both".
+    #[serde(default)]
+    pub mode: String,
+}
+
 fn yes() -> bool {
     true
 }
@@ -731,6 +749,7 @@ impl Default for Settings {
             route_apps: String::new(),
             tv_host: String::new(),
             tv_search: Default::default(),
+            tv_app_phrases: Vec::new(),
             macros: Vec::new(),
             bypass: String::new(),
             proxy_on: true,

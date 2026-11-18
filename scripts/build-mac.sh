@@ -28,7 +28,7 @@ chmod 755 dist/soundya/*
 # Plain tar: the speaker's busybox tar cannot read gzip.
 # Version and checksums: install.sh refuses a damaged package and checks the update started.
 # The same as the program says it is (src/main.rs VERSION): install.sh compares them.
-echo "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)${DEV:++dev}" > dist/soundya/VERSION
+echo "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 | tr -d '\r')${DEV:++dev}" > dist/soundya/VERSION
 (cd dist/soundya && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort \
     | while read -r f; do if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi; done > SHA256SUMS)
 TAR=dist/soundya-armv7${DEV:+-dev}.tar

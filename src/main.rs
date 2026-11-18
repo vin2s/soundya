@@ -614,6 +614,7 @@ impl Controller {
         settings["alarm_volume"] = self.settings.alarm_volume.into();
         settings["alarm_louder"] = self.settings.alarm_louder.into();
         settings["tv_search"] = serde_json::json!(self.settings.tv_search);
+        settings["tv_app_phrases"] = serde_json::json!(self.settings.tv_app_phrases);
         settings["pc_power"] = self.settings.pc_power.into();
         settings["pc_apps"] = self.settings.pc_apps.into();
         settings["pc_tg"] = self.settings.pc_tg.into();
@@ -1096,6 +1097,18 @@ impl Controller {
         // Macros are managed by the «macro» command, not this form: keep them.
         new.macros = self.settings.macros.clone();
         *self.shared.macros.lock().unwrap() = macro_list(&new);
+        // «Свои фразы для приложений»: drop empty rows and anything that is not
+        // a package name (it goes into an ADB shell command).
+        new.tv_app_phrases = std::mem::take(&mut new.tv_app_phrases)
+            .into_iter()
+            .map(|a| settings::AppPhrase {
+                phrase: a.phrase.trim().chars().take(200).collect(),
+                pkg: a.pkg.trim().to_owned(),
+                mode: match a.mode.as_str() { "open" | "search" => a.mode, _ => "both".into() },
+            })
+            .filter(|a| !a.phrase.is_empty() && tv::valid_package(&a.pkg))
+            .collect();
+        tv::set_app_phrases(app_phrase_list(&new));
         let token_changed = new.token != self.settings.token;
         let refresh_changed = new.sc_refresh != self.settings.sc_refresh;
         new.proxy = self.real_proxy(&new.proxy);
@@ -2061,6 +2074,7 @@ impl Controller {
                         // «продолжи» is the music's again.
                         if matches!(action, alice::TvAction::Sleep | alice::TvAction::Open(_) | alice::TvAction::OpenPackage(_) | alice::TvAction::OpenIn(..)
                             | alice::TvAction::OpenAndStart(_) | alice::TvAction::Close(_) | alice::TvAction::Search(_) | alice::TvAction::SearchIn(..)
+                            | alice::TvAction::SearchInPkg(..)
                             | alice::TvAction::YouTube(_) | alice::TvAction::PlayFirst)
                         {
                             alice::tv_forget_pause();
@@ -2748,8 +2762,7 @@ impl Controller {
                         None => send_to(&reply, "OK: отменено".into()),
                     };
                 }
-                let norm = alice::normalize_phrase(&arg);
-                if let Some((phrase, _)) = self.shared.macros().into_iter().find(|(p, _)| alice::macro_matches(&norm, p)) {
+                if let Some((phrase, _)) = alice::matching_macro(&arg, &self.shared.macros()) {
                     return send_to(&reply, format!("OK: сценарий «{phrase}» (не запускаю)"));
                 }
                 if let Some(steps) = alice::chain(&arg, self.settings.keyword_only) {
@@ -3963,6 +3976,30 @@ fn macro_lines(script: &str) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// «Свои фразы для приложений»: one entry per comma-separated name, the exact
+/// package and what to do. The names are compared with the whole spoken phrase.
+pub fn app_phrase_list(settings: &Settings) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for a in &settings.tv_app_phrases {
+        let pkg = a.pkg.trim();
+        if pkg.is_empty() || !tv::valid_package(pkg) {
+            continue;
+        }
+        let mode = match a.mode.as_str() {
+            "open" | "search" => a.mode.as_str(),
+            _ => "both",
+        };
+        for name in a.phrase.split([',', ';', '|']) {
+            let n = alice::normalize_phrase(name);
+            if n.is_empty() || out.iter().any(|(p, _, _): &(String, String, String)| *p == n) {
+                continue;
+            }
+            out.push((n, pkg.to_owned(), mode.to_owned()));
+        }
+    }
+    out
+}
+
 /// (normalized phrase, script) for every macro that has both filled in.
 fn macro_list(settings: &Settings) -> Vec<(String, String)> {
     settings
@@ -4174,6 +4211,7 @@ fn daemon() {
     alice::set_tv_off(!settings.tv_on && !settings.tvs().is_empty());
     sc::set_originals(settings.search_originals);
     tv::set_search_apps(settings.tv_search.clone());
+    tv::set_app_phrases(app_phrase_list(&settings));
     alice::set_devices(device_names(&settings));
     alice::set_pc_rules(pc_rules(&settings));
     alice::set_routes(routes(&settings));

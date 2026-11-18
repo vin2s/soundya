@@ -480,6 +480,11 @@ struct Msg {
     data: Vec<u8>,
 }
 
+/// Linux reports a socket read timeout as EAGAIN, «Resource temporarily unavailable (os error 11)».
+fn read_timeout(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
 fn recv(s: &mut TcpStream) -> io::Result<Msg> {
     let mut h = [0u8; 24];
     s.read_exact(&mut h)?;
@@ -520,8 +525,13 @@ fn connect_max(host: &str, key: &Key, confirm_wait: Duration) -> Result<(TcpStre
     loop {
         let m = match recv(&mut s) {
             Ok(m) => m,
-            Err(e) if offered_key && matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Err(e) if offered_key && read_timeout(&e) => {
                 return Err(Error::NeedsConfirm)
+            }
+            Err(e) if read_timeout(&e) => {
+                return Err(Error::Other(
+                    "телевизор не ответил на подключение. Он включён и не спит? «Отладка по сети» включена?".into(),
+                ))
             }
             Err(e) => return Err(Error::Other(format!("связь оборвалась: {e}"))),
         };
@@ -577,12 +587,22 @@ fn run_shell(s: &mut TcpStream, local: u32, command: &str, total: Duration, firs
         let m = match recv(s) {
             Ok(m) => m,
             Err(e) if acked && matches!(e.kind(), io::ErrorKind::UnexpectedEof) => break,
-            // A timeout before the answer is not proof of a dead connection (a busy TV forks
-            // the shell late): treated as taken, so a key is never pressed twice.
-            Err(e) => {
-                let timeout = matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut);
-                return Err((Error::Other(format!("связь оборвалась: {e}")), acked || timeout));
+            // Linux turns a socket read timeout into EAGAIN («os error 11»). A kept
+            // connection only waits a few seconds for the first byte, and a sleeping TV
+            // runs «input keyevent» longer than that — the command has already happened,
+            // so this must not be told to Alice as a failure, and it must not be sent again.
+            Err(e) if read_timeout(&e) => {
+                if deadline.saturating_duration_since(Instant::now()) > Duration::from_millis(250) {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    let _ = s.set_read_timeout(Some(left.min(total_wait)));
+                    continue;
+                }
+                if acked {
+                    break;
+                }
+                return Err((Error::Other("телевизор не ответил вовремя".into()), true));
             }
+            Err(e) => return Err((Error::Other(format!("связь оборвалась: {e}")), acked)),
         };
         // On a kept connection, a late message of an earlier stream.
         if matches!(m.cmd, OKAY | WRTE | CLSE) && m.a1 != local {

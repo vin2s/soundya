@@ -144,6 +144,14 @@
   .contact .to { flex: 1; }
   .devrow { flex-wrap: wrap; }
   .devrow .dname, .devrow .dhost { flex: 1 1 140px; }
+  #tvphrases .phraseadd { display: flex; gap: 6px; margin-top: 6px; align-items: center; flex-wrap: wrap; }
+  #tvphrases .phraseadd select, #tvphrases .phraseadd input {
+    flex: 1 1 140px; min-width: 0; width: auto; margin: 0; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  }
+  #tvphrases .phraseadd button { flex: none; width: auto; }
+  #tvphrases .tvblock { margin-top: 10px; }
+  #tvphrases .tvblock > b { color: var(--ink); }
   .devrow .dtoken, .devrow .dmac { flex: 1 1 120px; }
   .devrow .dtest { width: auto; padding: 8px 12px; }
   .tvpick { margin-left: auto; font: inherit; font-size: 13px; color: var(--ink); background: var(--field); border: 1px solid var(--glass-edge);
@@ -2029,6 +2037,20 @@
         Если приложение не примет поиск — откроется общий поиск телевизора. У каждого телевизора — своё.</p>
       <div id="tvsearch"></div>
       <div class="msg" id="tvsearchmsg"></div>
+      <div id="tvphrases"></div>
+      <div class="msg" id="tvphrasemsg"></div>
+      <div class="field">Свои фразы для приложений
+        <p class="hint">Назовите приложение по-своему: «делюкс, лэнд» — и «Алиса, найди фильм Колобок на делюкс»
+          откроет это приложение и найдёт в нём фильм. «Алиса, включи делюкс» — запустит его.
+          Выберите приложение из списка установленных на телевизоре: точное имя, без догадок.</p>
+        <div id="tvappphrases"></div>
+        <div class="row">
+          <button class="ghost" onclick="addTvAppPhrase()">+ Добавить фразу</button>
+          <button class="ghost" onclick="loadTvAppPhraseApps()">Загрузить приложения ТВ</button>
+          <button class="primary" onclick="saveTvAppPhrases()">Сохранить фразы</button>
+        </div>
+        <div class="msg" id="tvappphrasemsg"></div>
+      </div>
     </div>
     <label class="check">
       <input type="checkbox" id="remotetab" onchange="saveRemoteTab()">
@@ -3323,7 +3345,10 @@ function renderTvSearch(st) {
   if ((st.tv_host || '').trim()) tvs.push({ host: st.tv_host.trim(), label: st.tv_name || 'Телевизор' });
   for (const t of st.tvs_more || []) if ((t.host || '').trim()) tvs.push({ host: t.host.trim(), label: t.name || t.host });
   box.replaceChildren();
-  if (!tvs.length) { const p = document.createElement('p'); p.className = 'hint'; p.textContent = 'Сначала добавьте телевизор выше.'; box.append(p); return; }
+  if (!tvs.length) {
+    const p = document.createElement('p'); p.className = 'hint'; p.textContent = 'Сначала добавьте телевизор выше.'; box.append(p);
+    renderTvPhrases(st); return;
+  }
   for (const t of tvs) {
     const row = document.createElement('div'); row.className = 'row devrow';
     const name = document.createElement('b'); name.textContent = t.label;
@@ -3348,6 +3373,181 @@ function renderTvSearch(st) {
     row.append(name, sel, b);
     box.append(row);
   }
+  renderTvPhrases(st);
+}
+// A phrase that opens one package on this TV. A named TV is «tv@имя openpkg …»
+// (spaces in the name as «_»), the main TV without a name is «tv openpkg …».
+function tvPhraseScript(name, pkg) {
+  const n = (name || '').trim().replace(/\s+/g, '_');
+  return n ? `tv@${n} openpkg ${pkg}` : `tv openpkg ${pkg}`;
+}
+function tvPhrasePkg(script, tv) {
+  const lines = script.split('\n').map(s => s.trim()).filter(Boolean);
+  if (lines.length !== 1) return null;
+  const at = /^tv@(\S+) openpkg (\S+)$/.exec(lines[0]);
+  if (at && tv.name && at[1].replace(/_/g, ' ').toLowerCase() === tv.name.toLowerCase()) return at[2];
+  const plain = /^tv openpkg (\S+)$/.exec(lines[0]);
+  if (plain && tv.main) return plain[1];
+  return null;
+}
+let tvPhraseDraft = {};
+let tvPhraseGen = 0;
+async function renderTvPhrases(st) {
+  const box = $('tvphrases');
+  if (!box) return;
+  const gen = ++tvPhraseGen;
+  const tvs = [];
+  if ((st.tv_host || '').trim()) tvs.push({ host: st.tv_host.trim(), name: (st.tv_name || '').trim(), label: st.tv_name || 'Телевизор', main: true });
+  for (const t of st.tvs_more || []) if ((t.host || '').trim()) tvs.push({ host: t.host.trim(), name: (t.name || '').trim(), label: t.name || t.host, main: false });
+  box.replaceChildren();
+  if (!tvs.length) return;
+  const head = document.createElement('div'); head.className = 'field'; head.textContent = 'Своя фраза для приложения';
+  const hint = document.createElement('p'); hint.className = 'hint';
+  hint.textContent = 'Как «включи кинопоиск»: достаточно «включи фри тв». «Открой» и «запусти» тоже подходят. Если Алиса запишет имя иначе, приложение всё равно откроется. Несколько фраз через запятую — то же приложение.';
+  box.append(head, hint);
+  if (!tvs.some(t => tvSearchApps[t.host])) {
+    const p = document.createElement('p'); p.className = 'hint';
+    p.textContent = 'Сначала нажмите «Загрузить приложения» у телевизора выше.';
+    box.append(p);
+  }
+  const slots = [];
+  for (const t of tvs) {
+    const list = tvSearchApps[t.host];
+    const block = document.createElement('div'); block.className = 'tvblock';
+    if (tvs.length > 1) { const title = document.createElement('b'); title.textContent = t.label; block.append(title); }
+    if (list && !t.main && !t.name) {
+      const p = document.createElement('p'); p.className = 'hint';
+      p.textContent = 'Дайте этому телевизору имя выше и нажмите «Сохранить и подключить» — фраза должна попадать именно на него.';
+      block.append(p);
+    } else if (list) {
+      const row = document.createElement('div'); row.className = 'phraseadd';
+      const sel = document.createElement('select');
+      const pkgs = [...list.apps].sort((a, b) => (list.names[a] || a).localeCompare(list.names[b] || b, 'ru'));
+      if (!pkgs.length) {
+        const p = document.createElement('p'); p.className = 'hint'; p.textContent = 'На телевизоре не нашлось приложений, которые можно открыть.'; block.append(p);
+      } else {
+      for (const p of pkgs) {
+        const o = document.createElement('option'); o.value = p; o.textContent = list.names[p] || p; sel.appendChild(o);
+      }
+      const draft = tvPhraseDraft[t.host] || {};
+      if (draft.pkg && [...sel.options].some(o => o.value === draft.pkg)) sel.value = draft.pkg;
+      const input = document.createElement('input'); input.type = 'text'; input.maxLength = 240; input.placeholder = 'включи фри тв, включи free tv';
+      input.autocomplete = 'off'; input.value = draft.phrase || '';
+      const remember = () => { tvPhraseDraft[t.host] = { pkg: sel.value, phrase: input.value }; };
+      sel.onchange = remember; input.oninput = remember;
+      const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'primary'; btn.textContent = 'Сохранить фразы';
+      btn.onclick = () => saveAppPhrase(t, sel.value, input.value);
+      row.append(sel, input, btn);
+      block.append(row);
+      }
+    } else if (tvs.length > 1) {
+      const p = document.createElement('p'); p.className = 'hint'; p.textContent = 'Загрузите приложения у этого телевизора выше.'; block.append(p);
+    }
+    const ul = document.createElement('ul'); ul.className = 'list'; block.append(ul);
+    box.append(block);
+    slots.push({ t, list, ul });
+  }
+  const r = await postJSON('macro json');
+  if (gen !== tvPhraseGen) return;
+  if (r.error) { show($('tvphrasemsg'), 'error: ' + r.error); return; }
+  const labels = r.tv_names || {};
+  for (const { t, list, ul } of slots) {
+    for (const m of r.macros || []) {
+      const pkg = tvPhrasePkg(m.script || '', t);
+      if (!pkg) continue;
+      const name = (list && list.names[pkg]) || labels[pkg] || pkg;
+      const del = document.createElement('button'); del.className = 'link sdel'; del.textContent = '✕'; del.title = 'Удалить фразу';
+      del.onclick = async e => {
+        e.stopPropagation();
+        show($('tvphrasemsg'), await post('/api/cmd', 'macro del ' + m.phrase));
+        renderTvPhrases(settings);
+        loadMacros();
+      };
+      ul.appendChild(item(name, '«' + m.phrase + '»', '', null, '', del));
+    }
+  }
+}
+async function saveAppPhrase(tv, pkg, raw) {
+  const phrases = raw.split(',').map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!pkg) { show($('tvphrasemsg'), 'error: выберите приложение'); return; }
+  if (!phrases.length) { show($('tvphrasemsg'), 'error: напишите фразу'); return; }
+  if (phrases.some(p => p.includes('|||') || p.length > 80)) {
+    show($('tvphrasemsg'), 'error: каждая фраза короче 80 знаков и без |||');
+    return;
+  }
+  const script = tvPhraseScript(tv.name, pkg);
+  const saved = [];
+  for (const phrase of phrases) {
+    const r = await post('/api/cmd', 'macro add ' + phrase + ' ||| ' + script);
+    if (r.startsWith('error')) { show($('tvphrasemsg'), r); return; }
+    saved.push(phrase);
+  }
+  show($('tvphrasemsg'), saved.length > 1 ? `OK: сохранено фраз: ${saved.length}` : 'OK: макрос сохранён');
+  tvPhraseDraft[tv.host] = { pkg, phrase: '' };
+  renderTvPhrases(settings);
+  loadMacros();
+}
+// «Свои фразы для приложений»: how the user names a TV app, which one, and
+// what to do: запускать, искать в нём или и то и другое.
+let tvAppPhraseList = [];
+let tvAppPhraseApps = { apps: [], names: {} };
+function renderTvAppPhrases(st) {
+  const box = $('tvappphrases');
+  if (!box) return;
+  tvAppPhraseList = (st.tv_app_phrases || []).map(a => ({ phrase: a.phrase || '', pkg: a.pkg || '', mode: a.mode || 'both' }));
+  box.replaceChildren();
+  if (!tvAppPhraseList.length) {
+    const p = document.createElement('p'); p.className = 'hint';
+    p.textContent = 'Пока пусто: добавьте фразу и выберите приложение.';
+    box.append(p);
+    return;
+  }
+  for (const a of tvAppPhraseList) {
+    const row = document.createElement('div'); row.className = 'row devrow';
+    const phrase = document.createElement('input'); phrase.type = 'text'; phrase.maxLength = 200;
+    phrase.placeholder = 'делюкс, лэнд'; phrase.value = a.phrase; phrase.autocomplete = 'off';
+    phrase.oninput = () => { a.phrase = phrase.value; };
+    const sel = document.createElement('select');
+    const opts = [['', '— приложение —']].concat(tvAppPhraseApps.apps.map(p => [p, tvAppPhraseApps.names[p] || p]));
+    if (a.pkg && !opts.some(o => o[0] === a.pkg)) opts.unshift([a.pkg, a.pkg]);
+    sel.replaceChildren(...opts.map(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; return o; }));
+    sel.value = a.pkg;
+    sel.onchange = () => { a.pkg = sel.value; };
+    const mode = document.createElement('select');
+    for (const [v, t] of [['both', 'И то и другое'], ['search', 'Только искать'], ['open', 'Только запускать']]) {
+      const o = document.createElement('option'); o.value = v; o.textContent = t; mode.appendChild(o);
+    }
+    mode.value = a.mode;
+    mode.onchange = () => { a.mode = mode.value; };
+    const del = document.createElement('button'); del.className = 'link sdel'; del.textContent = '✕'; del.title = 'Убрать';
+    del.onclick = () => { tvAppPhraseList = tvAppPhraseList.filter(x => x !== a); renderTvAppPhrases(settings); };
+    row.append(phrase, sel, mode, del);
+    box.append(row);
+  }
+}
+function addTvAppPhrase() {
+  tvAppPhraseList.push({ phrase: '', pkg: '', mode: 'both' });
+  renderTvAppPhrases(settings);
+}
+async function loadTvAppPhraseApps() {
+  busy($('tvappphrasemsg'), 'Спрашиваю телевизор…');
+  const r = await postJSON('tv apps');
+  if (r.error || !r.apps) { show($('tvappphrasemsg'), 'error: ' + (r.error || 'телевизор не ответил')); return; }
+  tvAppPhraseApps = { apps: r.apps, names: r.names || {} };
+  busy($('tvappphrasemsg'), '');
+  renderTvAppPhrases(settings);
+  show($('tvappphrasemsg'), `OK: приложений на телевизоре: ${r.apps.length}`);
+}
+async function saveTvAppPhrases() {
+  const list = tvAppPhraseList.filter(a => (a.phrase || '').trim() && (a.pkg || '').trim());
+  if (tvAppPhraseList.length && list.length !== tvAppPhraseList.length) {
+    show($('tvappphrasemsg'), 'error: заполните фразу и выберите приложение в каждой строке'); return;
+  }
+  const saved = await post('/api/settings', JSON.stringify({ tv_app_phrases: list }));
+  if (saved.startsWith('error')) { show($('tvappphrasemsg'), saved); return; }
+  show($('tvappphrasemsg'), `Сохранено фраз: ${list.length}`);
+  tvAppPhraseList = list;
+  settingsLoaded = false; refresh();
 }
 async function saveTvSearch() {
   const map = {};
@@ -6158,6 +6358,7 @@ async function refresh(force = false) {
     renderDitoo();
     $('tvhost').value = settings.tv_host || '';
     renderTvSearch(settings);
+    renderTvAppPhrases(settings);
     $('fsc').checked = settings.soundcloud !== false;
     $('fpc').checked = settings.pc_on !== false;
     $('ftv').checked = settings.tv_on !== false;
